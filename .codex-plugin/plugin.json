@@ -22,5 +22,18 @@
         "FLEET_MCP_CODEX_WORKSPACE"
       ]
     }
+  },
+  "interface": {
+    "displayName": "Independent Fleet MCP",
+    "shortDescription": "Coordinate local project work",
+    "longDescription": "Independent Fleet MCP workers-off Standard-tier coordination core for Codex.",
+    "developerName": "ToolsEnabled, Inc.",
+    "category": "Productivity",
+    "websiteURL": "https://toolsenabled.ai",
+    "privacyPolicyURL": "https://toolsenabled.ai/privacy/",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
   }
 }

@@ -20,8 +20,8 @@ export FLEET_MCP_CODEX_WORKSPACE=/absolute/project
 ```
 
 Restart Codex with those two variables. The entry refuses missing/relative
-configuration, workers enabled, a tier other than Standard, and projects outside
-the sealed workspace. It serves canonical individual coordination/file tools as
+configuration, workers enabled, a tier other than Standard, and any selected workspace that does not resolve exactly to the sealed project
+directory. Children and parents refuse; an alias to the same directory may pass. It serves canonical individual coordination/file tools as
 actor codex; no setup, worker or Claude hook adaptation is added. Original host
 code is unchanged. No provider account or model call is needed in this server.
 

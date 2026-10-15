@@ -2,6 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 const { coreConfig, main } = require('./codex-entry');
 const state = path.resolve('fixture-state'), workspace = path.resolve('fixture-project');
 const env = { FLEET_MCP_CODEX_STATE_ROOT: state, FLEET_MCP_CODEX_WORKSPACE: workspace };
@@ -23,7 +25,22 @@ test('workers and non-Standard tiers refuse before serving', async () => {
     assert.equal(served,false);
   }
 });
-test('outside projects refuse while a configured descendant is admitted', () => {
-  assert.throws(()=>coreConfig(env,()=>({...valid,workspace:workspace+'-other'}),real),/WORKSPACE_REFUSED/);
-  assert.equal(coreConfig({...env,FLEET_MCP_CODEX_WORKSPACE:path.join(workspace,'child')},()=>valid,real),valid);
+test('exact canonical root and a physical alias pass; child, parent and unrelated paths refuse before serving', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-mcp-binding-'));
+  const project = path.join(fixture, 'project');
+  for (const folder of [project, path.join(project, 'child'), path.join(fixture, 'unrelated')]) fs.mkdirSync(folder, { recursive: true });
+  const alias = path.join(fixture, 'alias');fs.symlinkSync(project, alias, 'dir');
+  const saved = { ...valid, workspace: project };
+  for (const selected of [path.join(project, 'child'), fixture, path.join(fixture, 'unrelated')]) {
+    let served = false;
+    await assert.rejects(main({ env: { ...env, FLEET_MCP_CODEX_WORKSPACE: selected }, readConfig: () => saved,
+      serve: () => { served = true; } }), /FLEET_MCP_CODEX_WORKSPACE_REFUSED/);
+    assert.equal(served, false, selected);
+  }
+  for (const selected of [project, alias]) {
+    let actual;
+    await main({ env: { ...env, FLEET_MCP_CODEX_WORKSPACE: selected }, readConfig: () => saved, serve: config => { actual = config; } });
+    assert.equal(actual, saved);
+    assert.equal(fs.realpathSync(selected), fs.realpathSync(actual.workspace));
+  }
 });

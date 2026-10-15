@@ -11,9 +11,8 @@ function coreConfig(env, readConfig = runtime.readHostConfig, real = realpathSyn
   const config = readConfig(state, { setupKind: 'plugin' });
   if (config.workers !== false) throw new Error('FLEET_MCP_CODEX_WORKERS_REFUSED: configure a separate workers-off core.');
   if (config.tier !== 'standard') throw new Error('FLEET_MCP_CODEX_TIER_REFUSED: this package requires the Standard tier.');
-  const part = path.relative(real(config.workspace), real(workspace));
-  if (part === '..' || part.startsWith('..' + path.sep) || path.isAbsolute(part))
-    throw new Error('FLEET_MCP_CODEX_WORKSPACE_REFUSED: workspace is outside the configured project.');
+  if (real(workspace) !== real(config.workspace))
+    throw new Error('FLEET_MCP_CODEX_WORKSPACE_REFUSED: select the exact configured project directory, not its child or parent.');
   return config;
 }
 async function main({ env = process.env, readConfig, real, serve = runtime.serveHost } = {}) {
