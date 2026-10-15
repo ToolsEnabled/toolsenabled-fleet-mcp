@@ -1,0 +1,26 @@
+{
+  "name": "toolsenabled-fleet-mcp",
+  "version": "1.9.0",
+  "description": "Independent Fleet MCP workers-off Standard-tier coordination core for Codex.",
+  "author": {
+    "name": "ToolsEnabled, Inc.",
+    "email": "support@toolsenabled.ai"
+  },
+  "homepage": "https://toolsenabled.ai",
+  "license": "MIT",
+  "skills": "./codex-skills/",
+  "hooks": "./codex-hooks.json",
+  "mcpServers": {
+    "fleet-mcp": {
+      "command": "node",
+      "args": [
+        "./codex-entry.js"
+      ],
+      "cwd": "./",
+      "env_vars": [
+        "FLEET_MCP_CODEX_STATE_ROOT",
+        "FLEET_MCP_CODEX_WORKSPACE"
+      ]
+    }
+  }
+}
