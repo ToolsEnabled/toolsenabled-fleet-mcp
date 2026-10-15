@@ -15,9 +15,12 @@ function coreConfig(env, readConfig = runtime.readHostConfig, real = realpathSyn
     throw new Error('FLEET_MCP_CODEX_WORKSPACE_REFUSED: select the exact configured project directory, not its child or parent.');
   return config;
 }
-async function main({ env = process.env, readConfig, real, serve = runtime.serveHost } = {}) {
+async function main({ env = process.env, readConfig, real, serve = runtime.serveHost, enterWorkspace = process.chdir } = {}) {
   process.umask(0o077);
-  return serve(coreConfig(env, readConfig, real), { actor: 'codex' });
+  const config = coreConfig(env, readConfig, real);
+  // Keep relative arguments inside the same canonical selected project.
+  enterWorkspace(config.workspace);
+  return serve(config, { actor: 'codex' });
 }
 if (require.main === module) main().catch(error => { process.stderr.write(error.message + '\n'); process.exitCode = 1; });
 module.exports = { coreConfig, main };
