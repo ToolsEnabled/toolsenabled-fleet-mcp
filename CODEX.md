@@ -1,12 +1,12 @@
-# Independent Fleet MCP Codex candidate (unreleased)
+# Independent Fleet MCP for Codex
 
-This is a local-source candidate derived only from the published Fleet1.9.0
-source TAR, not the newer Claude plugin's1.11.4 runtime or any private history.
-An authorized public Git destination is unresolved; do not invent a repository.
-Use a verified local candidate checkout/bundle, then:
+This plugin is derived only from the published Fleet 1.9.0 source archive, not the
+Claude plugin's runtime or any private history, plus one change: Fleet does not
+limit a worker's rounds, tokens or time. Install it from this repository's
+`openai-plugin` branch:
 
 ```sh
-codex plugin marketplace add /absolute/candidate-root
+codex plugin marketplace add ToolsEnabled/toolsenabled-fleet-mcp --ref openai-plugin
 codex plugin add toolsenabled-fleet-mcp@toolsenabled-fleet-mcp-openai
 ```
 
@@ -34,6 +34,6 @@ links are https://toolsenabled.ai/privacy/ and https://toolsenabled.ai/terms/;
 coverage for this exact archive/Codex path still needs lead review. Source website
 is https://toolsenabled.ai; no dedicated product page is asserted.
 
-Only local marketplace/source qualification is possible before public Git
-routing is supplied. No public branch install, native Windows/macOS, worker
-lifecycle or directory approval is claimed. Do not submit or publish this bundle.
+Qualified by a fresh install from this repository with Codex CLI 0.162.1 on
+Linux x86_64. Native Windows/macOS, worker lifecycle and OpenAI directory approval
+are not claimed; the plugin has not been submitted to the directory.
