@@ -110,13 +110,14 @@ async function openSession(options = {}, resume = false) {
       ...(connection.auth === 'env' ? { tokenEnv: connection.tokenEnv } : {}),
       ...(connection.auth === 'openshell' ? { placeholder: readOpenShellPlaceholder(env, connection.tokenEnv) } : {}),
       tokenParameter: connection.tokenParameter,
-      timeoutMs: connection.limits.timeoutMs, maxOutputTokens: connection.limits.maxOutputTokens,
+      // Liveness for one request, not a work budget: a reply that never comes means a dead endpoint.
+      timeoutMs: 30 * 60 * 1000, maxOutputTokens: connection.limits.maxOutputTokens,
     }, { ...dependencies, authorizeCredential });
     const store = dependencies.threadStore === undefined
       ? (dependencies.createThreadStore || createLocalThreadStore)({ directory: threadDirectory }) : dependencies.threadStore;
     adapter = new ModelSessionAdapter({ transport, model: connection.model, threadStore: store,
       sessionIdentity: connectionIdentity(connection), clientInfo, limits: connection.limits, requireToolCall: true,
-      turnTimeoutMs: connection.limits.timeoutMs, maxOutputTokens: connection.limits.maxOutputTokens });
+      maxOutputTokens: connection.limits.maxOutputTokens });
     if (onEvent) adapter.onEvent(onEvent);
     const options = { ...threadOptions, ...(cwd ? { cwd } : {}) };
     let thread = resume ? await adapter.resumeThread(threadId, options) : null;

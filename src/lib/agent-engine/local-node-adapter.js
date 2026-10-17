@@ -78,13 +78,19 @@ const MAX_THREADS_HELD = 256;
 const MAX_HISTORY_MESSAGES = 400;
 /* What a resume reports, matching the Codex adapter's own cap. */
 const MAX_RESUMED_TURNS = 200;
-/* How many times one turn may go back to the model after tool results
-   before the turn is stopped. A model that keeps calling tools without ever
-   answering is looping, and a loop that is also spending the person's GPU
-   deserves a sentence rather than a spinner. */
-const MAX_TOOL_ROUNDS = 24;
-const MODEL_API_DEFAULT_LIMITS = Object.freeze({ maxTurns: 16, maxOutputTokens: 2048, maxTotalTokens: 1048576, timeoutMs: 180000 });
-const MODEL_API_MAX_LIMITS = Object.freeze({ maxTurns: 64, maxOutputTokens: 32768, maxTotalTokens: 1048576, timeoutMs: 3600000 });
+/* NO WORK BUDGETS (2026-10-17). Fleet does not stop a worker for the number of rounds it takes, the
+   tokens it uses or how long its work runs: the person gives it a task and gets what it produces.
+   A 24-round cap on local models, and a 16-round, 1,048,576-token, 3-minute default for generic
+   workers (hard maxima 64 rounds and one hour), were added without the owner asking and ended
+   working assignments on free local GPUs. Spending limits for paid endpoints belong at the provider.
+   What stays is liveness: a model request or a tool call that gives no answer for turnTimeoutMs
+   (30 minutes by default) means the server or tool is dead, and the assignment says so rather than
+   hanging. MAX_TOOL_ROUNDS stays exported for compatibility and is not enforced. */
+const MAX_TOOL_ROUNDS = Infinity;
+const MODEL_API_DEFAULT_LIMITS = Object.freeze({ maxOutputTokens: 2048 });
+const MODEL_API_MAX_LIMITS = Object.freeze({ maxOutputTokens: 32768 });
+/* Older saved connections carry these. They still load, and nothing enforces them. */
+const MODEL_API_LEGACY_LIMITS = Object.freeze(['maxTurns', 'maxTotalTokens', 'timeoutMs']);
 const RECEIPT_STATUSES = Object.freeze(['pending', 'success', 'error', 'interrupted']);
 const TURN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -92,18 +98,24 @@ function fail(code, message, details = {}) {
   return new LocalNodeError(code, message, details);
 }
 
+function unresponsiveSentence(ms) {
+  const minutes = Math.max(1, Math.round(ms / 60000));
+  return `The model or one of its tools gave no answer for ${minutes} minute${minutes === 1 ? '' : 's'}, so the assignment `
+    + 'was stopped as unresponsive. Fleet does not limit how long a worker that is making progress may run.';
+}
+
 function modelLimits(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).some(key => !Object.hasOwn(MODEL_API_DEFAULT_LIMITS, key))) {
-    throw new TypeError('Generic model limits must name only maxTurns, maxOutputTokens, maxTotalTokens and timeoutMs');
+      || Object.keys(value).some(key => !Object.hasOwn(MODEL_API_DEFAULT_LIMITS, key) && !MODEL_API_LEGACY_LIMITS.includes(key))) {
+    throw new TypeError('Generic model limits may name only maxOutputTokens (maxTurns, maxTotalTokens and timeoutMs are accepted from older connections and not enforced)');
   }
-  const result = { ...MODEL_API_DEFAULT_LIMITS, ...value };
-  for (const [name, limit] of Object.entries(result)) {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MODEL_API_MAX_LIMITS[name]) {
+  const result = { ...MODEL_API_DEFAULT_LIMITS };
+  for (const name of Object.keys(MODEL_API_DEFAULT_LIMITS)) {
+    if (Object.hasOwn(value, name)) result[name] = value[name];
+    if (!Number.isSafeInteger(result[name]) || result[name] < 1 || result[name] > MODEL_API_MAX_LIMITS[name]) {
       throw new TypeError(`Generic model ${name} must be an integer from 1 through ${MODEL_API_MAX_LIMITS[name]}`);
     }
   }
-  if (result.maxOutputTokens > result.maxTotalTokens) throw new TypeError('Generic model output budget cannot exceed its total budget');
   return Object.freeze(result);
 }
 
@@ -362,7 +374,8 @@ class LocalNodeAdapter {
        model with nothing to call is never shown an empty list. */
     this.tools = tools;
     this.clientInfo = clientInfo;
-    this.turnTimeoutMs = this.limits ? this.limits.timeoutMs : turnTimeoutMs;
+    // Liveness, not a deadline: the longest one model request or one tool call may go without answering.
+    this.turnTimeoutMs = turnTimeoutMs;
     this.maxOutputTokens = this.limits ? this.limits.maxOutputTokens : Number.isInteger(maxOutputTokens) && maxOutputTokens > 0 && maxOutputTokens <= MAX_OUTPUT_TOKENS
       ? maxOutputTokens
       : MAX_OUTPUT_TOKENS;
@@ -550,22 +563,11 @@ class LocalNodeAdapter {
       resolve: null,
       reject: null
     };
-    if (this.limits) {
-      turn.deadline = performance.now() + this.limits.timeoutMs;
-      turn.admittedTokens = 0;
-      turn.roundReservation = 0;
-    }
     const promise = new Promise((resolve, reject) => {
       turn.resolve = resolve;
       turn.reject = reject;
     });
-    turn.timer = setTimeout(() => {
-      if (this.activeTurn === turn) {
-        turn.timedOut = true;
-        turn.controller.abort();
-      }
-    }, this.turnTimeoutMs);
-    if (turn.timer.unref) turn.timer.unref();
+    this.armLiveness(turn);
     this.activeTurn = turn;
 
     /* The question joins the history before the request is made, so an
@@ -588,45 +590,34 @@ class LocalNodeAdapter {
     return surface ? surface.list().map(wireTool) : [];
   }
 
+  /* Liveness, not a deadline. Re-armed whenever the work moves -- each model request and each tool
+     call -- so only a model or a tool that gives NO answer for turnTimeoutMs stops the assignment. */
+  armLiveness(turn) {
+    if (turn.timer) clearTimeout(turn.timer);
+    turn.timer = setTimeout(() => {
+      if (this.activeTurn === turn) {
+        turn.timedOut = true;
+        turn.controller.abort();
+      }
+    }, this.turnTimeoutMs);
+    if (turn.timer.unref) turn.timer.unref();
+  }
+
   assertTurnLive(turn) {
-    if (this.limits && performance.now() >= turn.deadline) {
-      turn.timedOut = true;
-      turn.controller.abort();
-    }
     if (turn.controller.signal.aborted || turn.settled || this.closed) {
       throw fail(this.limits && turn.timedOut ? 'MODEL_API_TIMEOUT' : 'LOCAL_NODE_INTERRUPTED',
-        turn.timedOut ? 'The model assignment exceeded its wall-time limit.' : 'This model assignment has stopped.');
+        turn.timedOut ? unresponsiveSentence(this.turnTimeoutMs) : 'This model assignment has stopped.');
     }
   }
 
-  admitModelRequest(turn, request, round) {
+  // A new model request is progress: it re-arms liveness. No round, token or size budget is applied.
+  admitModelRequest(turn) {
     this.assertTurnLive(turn);
-    if (!this.limits) return;
-    if (round > this.limits.maxTurns) throw fail('MODEL_API_TURN_LIMIT', 'The model assignment reached its API-round limit.');
-    // This is deliberately a conservative admission unit, not provider
-    // billing: one UTF-8 byte of the fully serialized wire request counts as
-    // one admission unit, plus the requested maximum output tokens. The
-    // transport measures after name hashing/protocol shaping. The fallback
-    // serves injected test transports; real API transports supply the method.
-    // Unknown tokenizers are not guessed; reported usage only raises debit.
-    const inputBytes = typeof this.transport.requestInputBytes === 'function'
-      ? this.transport.requestInputBytes(request)
-      : Buffer.byteLength(JSON.stringify({ messages: request.messages, tools: request.tools || [] }), 'utf8');
-    if (!Number.isSafeInteger(inputBytes) || inputBytes < 1) throw fail('MODEL_API_TOKEN_LIMIT', 'The model request size could not be bounded safely.');
-    turn.roundReservation = inputBytes + this.maxOutputTokens;
-    if (turn.admittedTokens + turn.roundReservation > this.limits.maxTotalTokens) {
-      throw fail('MODEL_API_TOKEN_LIMIT', 'The next model request exceeds this assignment\'s aggregate token admission budget.');
-    }
-    turn.admittedTokens += turn.roundReservation;
+    this.armLiveness(turn);
   }
 
   observeModelUsage(turn) {
     if (!this.limits || !turn.roundUsage) return;
-    const reported = turn.roundUsage.totalTokens;
-    if (reported > turn.roundReservation) turn.admittedTokens += reported - turn.roundReservation;
-    if (turn.admittedTokens > this.limits.maxTotalTokens) {
-      throw fail('MODEL_API_TOKEN_LIMIT', 'The model reported usage beyond this assignment\'s aggregate token budget; no further tool was dispatched.');
-    }
     if (turn.roundUsage.outputTokens > this.maxOutputTokens) {
       throw fail('MODEL_API_OUTPUT_LIMIT', 'The model exceeded its output-token limit; no further tool was dispatched.');
     }
@@ -636,9 +627,8 @@ class LocalNodeAdapter {
      that names tools is committed to the history with its calls, every call
      is made through the surface and answered into the history as a `tool`
      message, and the model is asked again with those answers in front of
-     it; a reply that names none is the answer, and the turn ends. The
-     rounds are bounded (MAX_TOOL_ROUNDS) so a looping model ends in a
-     sentence. */
+     it; a reply that names none is the answer, and the turn ends. Nothing
+     counts the rounds: the work ends when the model answers. */
   async runTurn(turn, record) {
     const base = { threadId: turn.threadId, turnId: turn.turnId };
     const signal = turn.controller.signal;
@@ -705,9 +695,6 @@ class LocalNodeAdapter {
           } else outcome = 'success';
           break;
         }
-        if (this.limits && round >= this.limits.maxTurns) {
-          throw fail('MODEL_API_TURN_LIMIT', 'The model reached its API-round limit before finishing. The final tool requests were not dispatched.');
-        }
         if (this.transport.preserveToolCallIds === true) {
           const seen = new Set(record.messages.flatMap(message => (message.tool_calls || []).map(call => call.id)));
           for (const call of turn.roundToolCalls) {
@@ -724,9 +711,7 @@ class LocalNodeAdapter {
         let stopped = false;
         for (const call of turn.roundToolCalls) {
           this.assertTurnLive(turn);
-          if (this.limits && turn.admittedTokens >= this.limits.maxTotalTokens) {
-            throw fail('MODEL_API_TOKEN_LIMIT', 'The model assignment has no aggregate token budget remaining; no further tool was dispatched.');
-          }
+          this.armLiveness(turn); // a tool call is progress
           this.emit({ type: 'tool_call', ...base, toolCallId: call.id, tool: call.name, payload: call.arguments });
           await this.waitForEvents();
           this.assertTurnLive(turn);
@@ -749,13 +734,6 @@ class LocalNodeAdapter {
           this.saveThread(turn.threadId, record);
         }
         if (stopped || signal.aborted) { outcome = 'interrupted'; break; }
-        if (!this.limits && round >= MAX_TOOL_ROUNDS) {
-          outcome = 'error';
-          turn.error = fail('LOCAL_NODE_TOOL_ROUNDS_EXCEEDED',
-            `The local model called tools ${round} times in one turn without finishing its answer, so the turn was stopped.`,
-            { rounds: round });
-          break;
-        }
       }
     } catch (error) {
       if (signal.aborted) outcome = 'interrupted';
@@ -880,8 +858,8 @@ class LocalNodeAdapter {
       record.turnReceipt = settledReceipt(record, turn.turnId, 'interrupted');
       try { this.saveThread(turn.threadId, record); } catch (error) { this.emitDiagnostic(error); }
       const code = this.limits ? 'MODEL_API_TIMEOUT' : 'LOCAL_NODE_TURN_TIMEOUT';
-      for (const waiter of waiters) waiter.reject(fail(code, 'The model did not finish this assignment in time.'));
-      turn.reject(fail(code, 'The model did not finish this assignment in time.'));
+      for (const waiter of waiters) waiter.reject(fail(code, unresponsiveSentence(this.turnTimeoutMs)));
+      turn.reject(fail(code, unresponsiveSentence(this.turnTimeoutMs)));
       return;
     }
 

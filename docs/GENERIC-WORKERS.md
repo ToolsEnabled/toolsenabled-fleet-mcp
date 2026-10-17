@@ -200,43 +200,37 @@ answers without the required call fails with `MODEL_API_TOOL_UNSUPPORTED`.
 Later rounds may finish with ordinary assistant text. Prompts should request a
 useful Fleet action, such as reading the task list, rather than a greeting alone.
 
-## Bounds and failure handling
+## Limits and failure handling
 
-Limits apply to each submitted prompt, including a resumed prompt:
+**Fleet does not limit a worker's rounds, tokens or time.** You give a worker a task and it runs
+until the model answers. (Until 2026-10-17 Fleet stopped a generic worker at 16 rounds, at a
+cumulative 1,048,576-byte "admission budget" and at a 3-minute deadline, and a native local node at
+24 rounds. Nobody asked for those limits and they ended working assignments, so they were removed.)
+If you pay per token, set a spending limit with your provider; that is where a money cap belongs.
 
 | Setting | Default | Accepted range |
 |---|---:|---:|
-| `--max-turns` (model API rounds) | 16 | 1–64 |
-| `--max-output-tokens` (per response) | 2,048 | 1–32,768 |
-| `--max-total-tokens` (aggregate admission units) | 1,048,576 | 1,024–1,048,576 |
-| `--timeout-ms` (assignment deadline) | 180,000 | 100–3,600,000 |
+| `--max-output-tokens` (length of one reply, sent to the endpoint) | 2,048 | 1–32,768 |
 
-Every round resends Fleet's tool list; with the full list that is roughly 55 KB per round before conversation history, so the default budget admits about 16 rounds of a short assignment. Narrow the worker's tools with a role to fit more. Output tokens may not exceed the aggregate budget. A successful required-tool
-exchange needs at least two API rounds: a tool request followed by an answer
-using the result. Configuration accepts a one-round bound for low-level limit
-testing, but `worker run` refuses it before startup; use `--max-turns 2` or more.
-The final allowed API round
-must finish the assignment; tool requests returned on that round are not
-dispatched because no following model round is available.
+`--max-output-tokens` is a protocol parameter, not a budget: it is how long one reply may be, and
+some APIs (Anthropic's Messages API) require it. A reply that reaches it ends that assignment with
+`MODEL_API_OUTPUT_LIMIT`, because a cut-off reply cannot be trusted to carry complete tool calls;
+raise it if your model writes long replies.
 
-The aggregate bound is a conservative admission calculation, not a universal
-tokenizer or billing meter. Before each request, Fleet debits one unit per UTF-8
-byte of the complete serialized API request, after protocol and tool-name
-mapping, plus the requested maximum
-output tokens. It retains that reservation even when reported usage is lower;
-reported usage above the reservation increases the debit. An endpoint's
-omitted usage is unknown, not zero provider spend. Provider-specific
-tokenization and hidden provider overhead mean this is not a promise of exact billed
-tokens or cost. Use provider-side limits for a monetary cap.
+Connections saved before 2026-10-17 may carry `maxTurns`, `maxTotalTokens` and `timeoutMs`. They
+still load, the values are dropped, and nothing enforces them. `worker add` still accepts
+`--max-turns`, `--max-total-tokens` and `--timeout-ms` so that older scripts keep working, and says
+that they do nothing.
 
-The assignment deadline starts after Fleet's MCP tool startup; that startup
-has its own bounded protocol timeouts. The deadline uses a monotonic clock and stops admitting model requests or
-dispatching tools after expiry. HTTP requests have a cancellation deadline as
-well. Cancellation of an already-running tool is cooperative: an external
-effect may have happened before interruption, and settlement may take longer
-than the deadline. Fleet does not claim to undo it. Failed or interrupted work
-must be checked before retrying. HTTP failures, redirects and ambiguous model
-responses are not automatically retried.
+The one stop that remains is **liveness**: a model request or a tool call that gives no answer at
+all for 30 minutes means the endpoint or the tool is dead, and the assignment ends with
+`MODEL_API_TIMEOUT` saying so, rather than hanging forever and holding its slot. It is re-armed on
+every request and every tool call, so a worker that keeps making progress is never stopped,
+however long it runs.
+
+Cancellation of an already-running tool is cooperative: an external effect may have happened before
+interruption. Fleet does not claim to undo it. Failed or interrupted work must be checked before
+retrying. HTTP failures, redirects and ambiguous model responses are not automatically retried.
 
 Transport defaults cap request and response bodies at 4 MiB and tool calls per
 response at 128. Strict schemas, malformed argument refusal and advertised-name

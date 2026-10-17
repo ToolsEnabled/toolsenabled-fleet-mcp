@@ -91,9 +91,6 @@ async function workerCommand(argv, { env = process.env, stdout = process.stdout,
   const connection = connections.readConnections({ env, stateRoot: state }).find(row => row.name === run.name);
   if (!connection) throw Object.assign(new Error('No saved worker connection has that name.'), { code: 'OPENSHELL_MODEL_CONNECTION_NOT_FOUND' });
   connections.validateConnection(connection, { env });
-  if (connection.limits.maxTurns < 2) {
-    throw refusal('LIMITS_INVALID', 'A worker needs at least two API rounds: its required Fleet tool call and a reply using the result. Save this connection with --max-turns 2 or higher.');
-  }
   const fleetServer = buildFleetEntry({ env, stateRoot: state });
   const processApi = require('./agent-engine/model-api-process');
   const start = run.threadId ? dependencies.resumeSession || processApi.resumeModelApiSession

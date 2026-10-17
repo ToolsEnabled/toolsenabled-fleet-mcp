@@ -16,8 +16,13 @@ const TIERS = ['cheap', 'standard', 'premium'];
 const TOKEN_PARAMETERS = ['max_tokens', 'max_completion_tokens'];
 // One request carrying Fleet's tool list is tens of kilobytes, and admission
 // counts serialized bytes, so the default must fit the default number of rounds.
-const DEFAULT_LIMITS = Object.freeze({ maxTurns: 16, maxOutputTokens: 2048, maxTotalTokens: 1048576, timeoutMs: 180000 });
-const LIMIT_BOUNDS = Object.freeze({ maxTurns: [1, 64], maxOutputTokens: [1, 32768], maxTotalTokens: [1024, 1048576], timeoutMs: [100, 3600000] });
+/* NO WORK BUDGETS (2026-10-17): Fleet does not cap a worker's rounds, tokens or time; a spending
+   limit for a paid endpoint belongs at the provider. maxOutputTokens is the per-reply length the
+   endpoint is asked for, a protocol parameter. Connections saved earlier carry maxTurns,
+   maxTotalTokens and timeoutMs: they still load, the values are dropped, and nothing enforces them. */
+const DEFAULT_LIMITS = Object.freeze({ maxOutputTokens: 2048 });
+const LIMIT_BOUNDS = Object.freeze({ maxOutputTokens: [1, 32768] });
+const LEGACY_LIMITS = Object.freeze(['maxTurns', 'maxTotalTokens', 'timeoutMs']);
 
 function plainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -35,7 +40,7 @@ function plainObject(value) {
 function failure(suffix, message) {
   return Object.assign(new Error(message), { code: `OPENSHELL_MODEL_CONNECTION_${suffix}` });
 }
-function invalid() { throw failure('INVALID', 'The worker connection needs a valid name, matching endpoint and transport, exact model id, explicit source and authentication, and bounded limits.'); }
+function invalid() { throw failure('INVALID', 'The worker connection needs a valid name, matching endpoint and transport, exact model id, explicit source and authentication, and a valid per-reply output length.'); }
 function configInvalid() { throw failure('CONFIG_INVALID', 'The saved model connections must be a bounded valid JSON file with no symbolic or hard links.'); }
 function validateName(name) {
   // A connection cannot take a described agent's name: the tree would not know which one was meant.
@@ -73,12 +78,12 @@ function validateTokenEnv(name) {
 function limitsOf(input) {
   let value;
   try { value = plainObject(input, 'worker limits'); } catch { invalid(); }
-  if (Object.keys(value).some(key => !Object.hasOwn(DEFAULT_LIMITS, key))) invalid();
-  const limits = { ...DEFAULT_LIMITS, ...value };
+  if (Object.keys(value).some(key => !Object.hasOwn(DEFAULT_LIMITS, key) && !LEGACY_LIMITS.includes(key))) invalid();
+  const limits = { ...DEFAULT_LIMITS };
   for (const [key, [min, max]] of Object.entries(LIMIT_BOUNDS)) {
+    if (Object.hasOwn(value, key)) limits[key] = value[key];
     if (!Number.isSafeInteger(limits[key]) || limits[key] < min || limits[key] > max) invalid();
   }
-  if (limits.maxOutputTokens > limits.maxTotalTokens) invalid();
   return Object.freeze(limits);
 }
 
@@ -255,7 +260,7 @@ function workerConnection(spec, env) {
   return connection;
 }
 
-const USAGE = 'Usage: toolsenabled worker add NAME --transport openai-chat|openai-responses|anthropic-messages --endpoint URL --model ID --source api|local --auth openshell|env|none [--token-env VAR] [--tier cheap|standard|premium] [--token-parameter max_tokens|max_completion_tokens|max_output_tokens] [--max-turns N] [--max-output-tokens N] [--max-total-tokens N] [--timeout-ms N]; list [--json]; remove NAME';
+const USAGE = 'Usage: toolsenabled worker add NAME --transport openai-chat|openai-responses|anthropic-messages --endpoint URL --model ID --source api|local --auth openshell|env|none [--token-env VAR] [--tier cheap|standard|premium] [--token-parameter max_tokens|max_completion_tokens|max_output_tokens] [--max-output-tokens N]; list [--json]; remove NAME';
 function connectionCommand(argv, { env = process.env, stdout = process.stdout, stateRoot } = {}) {
   const usage = () => { throw failure('USAGE', USAGE); };
   if (!Array.isArray(argv) || argv.some(value => typeof value !== 'string')) usage();
@@ -266,7 +271,7 @@ function connectionCommand(argv, { env = process.env, stdout = process.stdout, s
     if (argv.length > 2 || argv.length === 2 && name !== '--json') usage();
     const rows = readConnections(options);
     stdout.write(name === '--json' ? `${JSON.stringify(rows)}\n` : rows.length
-      ? `${rows.map(row => `${row.name}  ${row.transport}  ${row.source}  ${row.tier}  ${row.model}  ${row.endpoint}  ${row.auth}${row.tokenEnv ? `: ${row.tokenEnv}` : ''}  max turns: ${row.limits.maxTurns}, output tokens: ${row.limits.maxOutputTokens}, total tokens: ${row.limits.maxTotalTokens}, time ms: ${row.limits.timeoutMs}`).join('\n')}\n`
+      ? `${rows.map(row => `${row.name}  ${row.transport}  ${row.source}  ${row.tier}  ${row.model}  ${row.endpoint}  ${row.auth}${row.tokenEnv ? `: ${row.tokenEnv}` : ''}  output tokens per reply: ${row.limits.maxOutputTokens}; no round, token or time limit`).join('\n')}\n`
       : 'No worker connections are configured.\n');
     return 0;
   }
@@ -293,6 +298,9 @@ function connectionCommand(argv, { env = process.env, stdout = process.stdout, s
     // credential authority. The metadata-only helper deliberately cannot.
     save(connection, options, true);
     stdout.write(`Saved worker connection ${connection.name}: ${connection.model}. Select tier model-${connection.name}.\n`);
+    if (['--max-turns', '--max-total-tokens', '--timeout-ms'].some(flag => argv.includes(flag))) {
+      stdout.write('Note: --max-turns, --max-total-tokens and --timeout-ms do nothing now. Fleet does not limit a worker\'s rounds, tokens or time; set spending limits at the provider.\n');
+    }
   } else { removeConnection(name, options); stdout.write(`Removed worker connection ${name}.\n`); }
   stdout.write('Restart the Fleet MCP server/client session to refresh the agent-tree model catalog. Standalone worker run reads this change on its next launch.\n');
   return 0;
