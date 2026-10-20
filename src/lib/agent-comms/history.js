@@ -740,6 +740,7 @@ function createHistory({
 }
 
 module.exports = Object.freeze({
+  configuredScreening, looksLikeCredential,
   inspectStoredRow,
   DEFAULT_MAX_CHANNEL_BYTES,
   DEFAULT_MAX_MESSAGE_BYTES,

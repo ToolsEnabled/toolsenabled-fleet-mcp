@@ -96,6 +96,13 @@ function readHostConfig(stateRoot, { allowPluginRebind = false, setupKind = null
       || ![undefined, 'plugin'].includes(config.setupKind)) {
     refuse('HOST_CONFIG_INVALID', 'Host configuration does not name an explicit supported host installation.');
   }
+  if (config.profile !== undefined && (config.profile !== 'fleetV2' || config.setupKind === 'plugin'))
+    refuse('HOST_CONFIG_INVALID', 'FleetV2 is a standalone installation profile.');
+  if (config.profile === 'fleetV2') {
+    const normalized = require('./fleet-folder-scope').normalize(config.fleetV2Scope);
+    if (JSON.stringify(normalized) !== JSON.stringify(config.fleetV2Scope))
+      refuse('HOST_CONFIG_INVALID', 'The FleetV2 parent folder policy must be normalized and explicit.');
+  }
   for (const key of ['workspace', 'stateRoot', 'installRoot', 'nodePath']) absolute(config[key], key);
   if (config.providers !== undefined && !validProviderList(config.providers, config)) {
     refuse('HOST_CONFIG_INVALID', 'The saved subagent providers are invalid. Run /tefleet setup again in this project.');
@@ -158,11 +165,12 @@ function configureHost(config, { env = process.env, actor } = {}) {
   requireHostEnvironment(env);
   process.umask(0o077);
   const levelCap = env.TOOLSENABLED_LEVEL_CAP;
+  const fleetV2 = config.setupKind !== 'plugin' && config.profile === 'fleetV2';
   const workerNames = ['TREE_SOCKET', 'NODE', 'SESSION', 'LINK_TOKEN_FILE', 'ROLE', 'DIRECT_ONLY']
     .map(name => `TOOLSENABLED_HOST_${name}`);
   const workerEnvironment = config.workers ? Object.fromEntries(workerNames
     .filter(name => typeof env[name] === 'string' && env[name] !== '').map(name => [name, env[name]])) : {};
-  const baseAllowlist = require('./host-surface').hostAllowlist({ workers: config.workers });
+  const baseAllowlist = require('./host-surface').hostAllowlist({ workers: config.workers, fleetV2 });
   let allowed = baseAllowlist;
   if (workerEnvironment.TOOLSENABLED_HOST_NODE) {
     const inherited = new Set(String(env.TOOLSENABLED_TOOL_ALLOWLIST || '').split(',').filter(Boolean));
@@ -172,6 +180,7 @@ function configureHost(config, { env = process.env, actor } = {}) {
   // A provider can inherit another MCP server's profile. Every runtime state
   // override and identity hint is re-established from this installation.
   for (const name of Object.keys(env)) if (name.startsWith('TOOLSENABLED_')) delete env[name];
+  if (fleetV2) env.TOOLSENABLED_FLEET_PROFILE = 'fleetV2';
   if (levelCap !== undefined) env.TOOLSENABLED_LEVEL_CAP = levelCap;
   env.TOOLSENABLED_RUNTIME_MODE = 'host';
   env.TOOLSENABLED_HOST_WORKERS = config.workers ? '1' : '0';

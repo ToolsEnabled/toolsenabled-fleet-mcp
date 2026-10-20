@@ -348,5 +348,5 @@ function loadSettings({ registry, valuesPath, env, machineRecord, servicesRoot, 
 
 module.exports = {
   loadSettings,
-  resolveValuesPath
+  resolveValuesPath, validationFailure
 };

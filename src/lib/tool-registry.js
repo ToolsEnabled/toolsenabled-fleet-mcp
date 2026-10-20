@@ -878,6 +878,19 @@ function systemStatus(_args = {}, dependencies = {}) {
 // Fleet's tool definitions. The host and OpenShell surfaces narrow this same
 // set by permission level and by whether workers are enabled.
 const CORE_TOOLS = [
+  define('fleet.control', 'FleetV2 durable coordination: read tasks/rules/pending asks, file worker asks, and root-only revision checked edits, answers, settings and lifecycle.', schema({
+    action: { type: 'string', enum: ['read', 'ask', 'task', 'rule', 'answer', 'pause', 'stop', 'resume', 'remove', 'settings', 'settings-read', 'progress', 'complete', 'import-settings', 'resources', 'resources-read', 'resource-advice', 'archive-ask'] },
+    expectedRevision: { type: 'integer', minimum: 0 }, nodeId: { type: 'string', minLength: 1, maxLength: 64 },
+    id: { type: 'string', minLength: 1, maxLength: 64 }, text: { type: 'string', minLength: 1, maxLength: 12000 },
+    question: { type: 'string', minLength: 1, maxLength: 4000 }, answer: { type: 'string', minLength: 1, maxLength: 4000 },
+    policy: { type: 'object', additionalProperties: true }, provider: { type: 'string', maxLength: 64 }, decision: { type: 'string', enum: ['allow', 'hold'] }, launches: { type: 'integer', minimum: 0, maximum: 64 }, expiresAtMs: { type: 'number' }, reason: { type: 'string', maxLength: 2000 },
+    active: { type: 'boolean' }, newTask: { type: 'boolean' }, changes: { type: 'object', additionalProperties: true }
+  }, ['action']), (args, context = {}) => {
+    const host = require('./tree-host-registry').treeSpawnHost();
+    if (host?.fleetControlVersion !== 1 || typeof host.fleetControl !== 'function')
+      throw Object.assign(new Error('FleetV2 control requires its explicit standalone host profile.'), { code: 'FLEET_CONTROL_UNAVAILABLE' });
+    return host.fleetControl(args, context.agentPrincipal?.sessionId);
+  }, { effect: 'local-write' }),
   define('system.status', 'Return Fleet runtime health and safety state.', schema({}), systemStatus, { effect: 'local-read' }),
   define('settings.read', 'Return the resolved local settings values, provenance, rejected values, revision, and values path without changing settings. Pass ids to read only those settings.', schema({
     ids: { type: 'array', minItems: 1, maxItems: 100, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 200 }, description: 'Only these setting ids; each must be a declared setting.' }
@@ -1709,6 +1722,10 @@ function registeredTools({ allowedToolNames, permissionSession, agentRole } = {}
       ? TOOL_REGISTRY.filter(entry => allowlist.some(selector => selectorMatchesTool(selector, entry.name)))
       : TOOL_REGISTRY;
   }
+  const fleetHost = require('./tree-host-registry').treeSpawnHost();
+  tools = tools.filter(entry => entry.name !== 'fleet.control' || fleetHost?.fleetControlVersion === 1);
+  if (fleetHost?.fleetOrchestrator === true) tools = tools.filter(entry => entry.name !== 'agent_comms.send_local');
+  else if (fleetHost?.fleetControlVersion === 1) tools = tools.map(entry => entry.name === 'fleet.control' ? require('./fleet-v2-control-surface').workerEntry(entry) : entry);
   {
     const names = new Set(require('./role-functions').narrowFunctionNames(tools.map(entry => entry.name), agentRole));
     tools = tools.filter(entry => names.has(entry.name));
@@ -1728,10 +1745,11 @@ function getTool(name, options = {}) {
 function assertToolRegistered(name, options = {}) {
   const entry = BY_NAME.get(name);
   if (!entry) throw new UnknownToolError(name);
-  if (!getTool(name, options)) {
+  const offered = getTool(name, options);
+  if (!offered) {
     throw new ToolNotEnabledError(name, { requestScoped: options.allowedToolNames !== undefined });
   }
-  return name === 'agent.spawn' ? require('./openshell-spawn-tiers').spawnEntry(entry) : entry;
+  return name === 'fleet.control' ? Object.freeze({ ...entry, inputSchema: offered.inputSchema, baseInputSchema: offered.baseInputSchema }) : name === 'agent.spawn' ? require('./openshell-spawn-tiers').spawnEntry(entry) : entry;
 }
 
 function listTools(options = {}) {
@@ -2505,7 +2523,7 @@ async function executeToolWithinPolicy(name, args = {}, context = {}) {
     // context.test.js, which drives executeTool rather than the provider --
     // the provider's own suite was green throughout.
     const contextAwareHandler = [
-      'system.ask', 'system.notify',
+      'fleet.control', 'system.ask', 'system.notify',
       'host.exec', 'host.read_file', 'host.write_file', 'host.patch_file', 'host.list_dir',
       'capability.find', 'agent_comms.send_local', 'agent_comms.local_roster',
       'agent.spawn', 'agent.wait', 'agent.continue', 'agent.set_model', 'agent.set_effort', 'agent.set_speed', 'agent.set_provider',

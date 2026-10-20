@@ -34,7 +34,7 @@
     "ledger.verify_history": "Verify complete ledger history",
     "audit.activity": "Tool activity audit",
     "tools.throughput": "How fast assistants' tool calls are handled",
-    "agent.subagent_route": "Where an assistant’s own assistants appear",
+    "agent.subagent_route": "Where an assistant\u2019s own assistants appear",
     "agent.message_screening": "Screening messages between agents for credentials",
     "agent.tool_mode": "Compatibility name for available tool sets",
     "agent.product_source_writes": "Letting agents edit ToolsEnabled source in checkouts",
@@ -109,9 +109,9 @@
       "depth": 2,
       "control": "toggle",
       "default": false,
-      "consequence": "The older on/off form of \"Who adds standing rules\": it reads on when that choice is Agents too and off otherwise, and choosing there is what changes it. Your agents can notice when you say something meant to last — \"always ask before spending money\", \"from now on keep it short\" — and write it down as a standing rule in your own words. Off: only you file rules, by typing /Request. On: the agent decides when something you said is a rule and files it, marked as filed by that agent; the chat shows you a line saying what was filed and where, and every later session reads it until you edit or delete the entry by hand. When an agent is unsure it suggests the rule instead and you accept or decline it. This covers the standing-rule ledgers only — your agents' durable notes, research findings, tasks and messages have their own tools and are not changed here. At the Guided level agents only read, so nothing is filed either way.",
+      "consequence": "The older on/off form of \"Who adds standing rules\": it reads on when that choice is Agents too and off otherwise, and choosing there is what changes it. Your agents can notice when you say something meant to last \u2014 \"always ask before spending money\", \"from now on keep it short\" \u2014 and write it down as a standing rule in your own words. Off: only you file rules, by typing /Request. On: the agent decides when something you said is a rule and files it, marked as filed by that agent; the chat shows you a line saying what was filed and where, and every later session reads it until you edit or delete the entry by hand. When an agent is unsure it suggests the rule instead and you accept or decline it. This covers the standing-rule ledgers only \u2014 your agents' durable notes, research findings, tasks and messages have their own tools and are not changed here. At the Guided level agents only read, so nothing is filed either way.",
       "capabilities": [
-        "You say a thing once, in your own words, and it keeps applying — no command to remember."
+        "You say a thing once, in your own words, and it keeps applying \u2014 no command to remember."
       ],
       "risks": [
         "On, an offhand remark can become a rule that steers every later session until you find it in the rules panel and delete it by hand.",
@@ -150,7 +150,7 @@
         "On, a rule you did mean waits on the Ledger page, and agents work without it until you approve it."
       ],
       "derivedFrom": "built-in product policy",
-      "enforcedBy": "src/lib/r-ledger-agent-gate.js agentFiledNeedsApprovalOf() is what reads this row, under the same provenance rule as its two siblings; src/lib/owner-request-store.js fileRequest asks it and files an agent’s rule as proposed rather than active when the answer is yes"
+      "enforcedBy": "src/lib/r-ledger-agent-gate.js agentFiledNeedsApprovalOf() is what reads this row, under the same provenance rule as its two siblings; src/lib/owner-request-store.js fileRequest asks it and files an agent\u2019s rule as proposed rather than active when the answer is yes"
     },
     {
       "id": "fleet.tree_width",
@@ -232,7 +232,7 @@
         "Several assistants can save to the same shared file at once, so none of them waits for the others."
       ],
       "risks": [
-        "When two save at once, one of them silently loses its work, and your project’s record of what happened no longer matches what is on disk."
+        "When two save at once, one of them silently loses its work, and your project\u2019s record of what happened no longer matches what is on disk."
       ],
       "derivedFrom": "",
       "enforcedBy": "src/lib/shared-write-guard.js withSharedWrite at src/lib/providers/host-control.js writeFile",
@@ -282,10 +282,10 @@
           }
         ],
         "verify": "The step that stopped now completes, and this product stops reporting that something it ran asked for administrator rights.",
-        "withoutIt": "The setting stays on and saves, and everything else at your level keeps working. A project whose setup asks for administrator rights stops at that step and says so plainly — including when Windows refuses the request on its own because there was nowhere to show you the approval box, which it misleadingly reports as you having cancelled it. Nothing is retried with more rights, nothing is recorded as done, and no partial result is thrown away."
+        "withoutIt": "The setting stays on and saves, and everything else at your level keeps working. A project whose setup asks for administrator rights stops at that step and says so plainly \u2014 including when Windows refuses the request on its own because there was nowhere to show you the approval box, which it misleadingly reports as you having cancelled it. Nothing is retried with more rights, nothing is recorded as done, and no partial result is thrown away."
       },
       "derivedFrom": "current-install setup policy",
-      "enforcedBy": "machine.json.tier via src/lib/setup/machine-record.js and src/lib/permission-tier-policy.js at src/lib/tool-registry.js executeTool; src/lib/settings.js capabilityBoundaryReadback is what puts that record’s tier into this row and rejects any value stored against it"
+      "enforcedBy": "machine.json.tier via src/lib/setup/machine-record.js and src/lib/permission-tier-policy.js at src/lib/tool-registry.js executeTool; src/lib/settings.js capabilityBoundaryReadback is what puts that record\u2019s tier into this row and rejects any value stored against it"
     },
     {
       "id": "capability.workspace_roots",
@@ -293,7 +293,7 @@
       "depth": 2,
       "control": "readback",
       "default": [],
-      "consequence": "This is where you add or remove the specific project folders your assistants may work in, if your install lets you choose more than one — some installs are limited to a single folder chosen for you, or already cover your whole computer. Add a folder here and your assistants can start reading and writing inside it right away; remove one and they lose access immediately, even if something was left unfinished there. If your install only allows one fixed folder, there is nothing to add or remove here, because that folder was already decided when you set the program up.",
+      "consequence": "This is where you add or remove the specific project folders your assistants may work in, if your install lets you choose more than one \u2014 some installs are limited to a single folder chosen for you, or already cover your whole computer. Add a folder here and your assistants can start reading and writing inside it right away; remove one and they lose access immediately, even if something was left unfinished there. If your install only allows one fixed folder, there is nothing to add or remove here, because that folder was already decided when you set the program up.",
       "readOnlyReason": "Read-only here because adding a folder through ordinary settings would widen the installation boundary. The displayed folders come from machine.json.workspaceRoots, where setup records them. To change them, run ToolsEnabled setup again yourself; confined dispatches read the recorded roots on every call.",
       "capabilities": [
         "Adding a folder lets assistants read and change what is in it, immediately."
@@ -303,7 +303,7 @@
         "Removing a folder cuts access instantly, including for work left unfinished inside it."
       ],
       "derivedFrom": "current-install setup policy",
-      "enforcedBy": "machine.json.workspaceRoots via src/lib/tool-registry.js confinedWorkspaceRoots, src/lib/permission-tier-policy.js, src/lib/confined-tool-surface.js, and src/lib/workspace-boundary.js; src/lib/settings.js capabilityBoundaryReadback is what puts that record’s roots into this row and rejects any value stored against it"
+      "enforcedBy": "machine.json.workspaceRoots via src/lib/tool-registry.js confinedWorkspaceRoots, src/lib/permission-tier-policy.js, src/lib/confined-tool-surface.js, and src/lib/workspace-boundary.js; src/lib/settings.js capabilityBoundaryReadback is what puts that record\u2019s roots into this row and rejects any value stored against it"
     },
     {
       "id": "capability.elevation_duration",
@@ -414,14 +414,14 @@
       "depth": 1,
       "control": "seg",
       "default": "Enabled",
-      "consequence": "Choose which tools new agent sessions receive. Only uses ToolsEnabled API tools and restricts native tools. Optimized works with Claude only: it adds Claude’s file search, skills, planning and tool search to the API tools. Sessions on other providers do not start while Optimized is selected. Enabled, the default, offers both the API and the provider’s native tools. Disabled withholds the ToolsEnabled API and keeps native tools within the existing role and permission limits. Existing sessions keep their captured choice. API outcome summaries follow Tool activity audit; native tool activity is not added to that API audit.",
+      "consequence": "Choose which tools new agent sessions receive. Only uses ToolsEnabled API tools and restricts native tools. Optimized works with Claude only: it adds Claude\u2019s file search, skills, planning and tool search to the API tools. Sessions on other providers do not start while Optimized is selected. Enabled, the default, offers both the API and the provider\u2019s native tools. Disabled withholds the ToolsEnabled API and keeps native tools within the existing role and permission limits. Existing sessions keep their captured choice. API outcome summaries follow Tool activity audit; native tool activity is not added to that API audit.",
       "capabilities": [
         "Choose API tools only, API tools with a few Claude native tools, both full tool sets, or native tools for new sessions.",
         "API calls keep their permissions, approvals and required signed security records. Tool activity audit controls outcome summaries."
       ],
       "risks": [
         "Only can prevent a task when the API has no working equivalent for a native tool.",
-        "Optimized works with Claude only. Codex, Gemini, Grok and local sessions do not start while it is selected. Claude’s selected native actions follow its permissions and are not in the ToolsEnabled API audit.",
+        "Optimized works with Claude only. Codex, Gemini, Grok and local sessions do not start while it is selected. Claude\u2019s selected native actions follow its permissions and are not in the ToolsEnabled API audit.",
         "Enabled lets an agent choose native tools whose actions are not in the ToolsEnabled API audit.",
         "Disabled removes API-based coordination and integrations. Providers with no native tools may have no tools available."
       ],
@@ -458,7 +458,7 @@
       "depth": 1,
       "control": "seg",
       "default": "Let the assistant decide",
-      "consequence": "When one of your assistants starts another one, this decides where the new one appears. Left as it is, a new assistant joins your tree when the one that started it is already on your tree, and runs on its own otherwise. Set to always on your tree, every assistant an assistant starts is drawn as a circle under it, with its own name, its own conversation and the same stop button as one you started by hand; a start is refused, and says so, when the assistant asking is not itself on a tree. Set to never on your tree, they run on their own the way they always have: bounded, recorded and reachable through the request ledger, but nothing is drawn for you to see. This is a separate question from whether your assistants use this program’s tools at all, which the row above decides.",
+      "consequence": "When one of your assistants starts another one, this decides where the new one appears. Left as it is, a new assistant joins your tree when the one that started it is already on your tree, and runs on its own otherwise. Set to always on your tree, every assistant an assistant starts is drawn as a circle under it, with its own name, its own conversation and the same stop button as one you started by hand; a start is refused, and says so, when the assistant asking is not itself on a tree. Set to never on your tree, they run on their own the way they always have: bounded, recorded and reachable through the request ledger, but nothing is drawn for you to see. This is a separate question from whether your assistants use this program\u2019s tools at all, which the row above decides.",
       "capabilities": [
         "An assistant that another assistant started shows up as a circle you can read, talk to and stop, instead of working somewhere you cannot see.",
         "You settle it once for every assistant on this computer, rather than hoping each one makes the same choice about where to hand work down."
@@ -589,7 +589,7 @@
           "Requests are answered instead of stopping with \"no model provider is configured\"."
         ],
         "risks": [
-          "A service running on this computer uses this computer’s memory and processor while it answers.",
+          "A service running on this computer uses this computer\u2019s memory and processor while it answers.",
           "A service somewhere else receives the text of your prompts."
         ],
         "required": false,
@@ -938,6 +938,67 @@
       "enforcedBy": "src/lib/p13-setting.js reads the setting; src/lib/tool-registry.js requires a scoped decision when enabled",
       "applies": "restart",
       "warningText": "Consequential calls need scoped policy authorization when this is on. Calls without it are refused."
+    },
+    {
+      "id": "agent.message_delivery",
+      "section": "F",
+      "depth": 1,
+      "control": "seg",
+      "default": "End of turn",
+      "consequence": "Choose Instant to deliver agent messages during active turns when the runtime supports additional input, Timer to collect messages for the selected interval, or End of turn to wait for completion. The courier never stops an active turn. Unsupported runtimes keep messages queued for the next boundary.",
+      "capabilities": [
+        "Receive agent reports while work continues.",
+        "Collect incoming agent reports and deliver them together after your chosen interval."
+      ],
+      "risks": [
+        "Instant delivery can change the focus of work in progress.",
+        "A runtime without live input delivers at the next turn boundary."
+      ],
+      "derivedFrom": "built-in product policy",
+      "enforcedBy": "src/lib/fleet-v2-message-policy.js reads this control; src/lib/openshell-agent-host.js enforces queue timing and task session reset in the standalone FleetV2 profile.",
+      "options": [
+        "Instant",
+        "Timer",
+        "End of turn"
+      ],
+      "applies": "next-call"
+    },
+    {
+      "id": "agent.message_queue_seconds",
+      "section": "F",
+      "depth": 1,
+      "control": "number",
+      "default": 30,
+      "minimum": 1,
+      "maximum": 3600,
+      "step": 1,
+      "unit": "seconds",
+      "consequence": "When Timer is selected, collect messages for this many seconds starting from the first queued message. New arrivals do not extend the timer.",
+      "capabilities": [
+        "Control how often a batch of agent messages is delivered."
+      ],
+      "risks": [
+        "Longer intervals delay incoming results and questions."
+      ],
+      "derivedFrom": "built-in product policy",
+      "enforcedBy": "src/lib/fleet-v2-message-policy.js reads this control; src/lib/openshell-agent-host.js enforces queue timing and task session reset in the standalone FleetV2 profile.",
+      "applies": "next-call"
+    },
+    {
+      "id": "fleet.worker_reset_after_task",
+      "section": "E",
+      "depth": 2,
+      "control": "toggle",
+      "default": true,
+      "consequence": "This decides whether a worker assistant remembers what it was doing once it finishes one task and picks up the next. On, the shipped setting, each new task starts from a clean slate: nothing carries over, so a mistake or a stray assumption from the last task cannot quietly follow it into this one, though the worker also has to be told again anything it would otherwise still know. Off, workers keep their memory between tasks, which saves re-explaining things but means something that went wrong earlier can keep shaping work you have not looked at yet.",
+      "capabilities": [
+        "Off, a worker carries what it learned into its next task, so it does not rediscover the same thing twice."
+      ],
+      "risks": [
+        "Off, a wrong belief formed in one task follows it into every task after that, and the second failure looks unrelated to the first."
+      ],
+      "derivedFrom": "built-in product policy",
+      "enforcedBy": "src/lib/fleet-v2-message-policy.js reads this control; src/lib/openshell-agent-host.js enforces queue timing and task session reset in the standalone FleetV2 profile."
     }
   ]
 }

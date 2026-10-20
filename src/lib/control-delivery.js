@@ -51,7 +51,7 @@ function deliveryOnTime(deadline, now) {
 }
 
 function createControlDelivery({ snapshot, children = () => [], queue, adapter, format, commit, journal = {},
-  clock = () => performance.now(), newId = () => crypto.randomUUID() }) {
+  canDeliver = () => true, clock = () => performance.now(), newId = () => crypto.randomUUID() }) {
   journal.attempts = Array.isArray(journal.attempts) ? journal.attempts : [];
   // Retained accepted records are tombstones, not in-flight capacity. Never
   // discard their identities or message IDs to make a full journal pass.
@@ -146,6 +146,7 @@ function createControlDelivery({ snapshot, children = () => [], queue, adapter, 
     if (!bound) return { status: 'unsupported', reason: 'no-active-turn', operationCompleted: true,
       messagesPending: queue(session.nodeId).length, providerAcknowledged: false };
     sameIdentity(bound, snapshot(bound.nodeId));
+    if (!canDeliver(bound.nodeId, { active: true })) return { status: 'held', reason: 'message-delivery-policy' };
     const receiver = adapter(bound.nodeId);
     if (typeof receiver?.steerTurn !== 'function')
       return { status: 'unsupported', reason: 'adapter-active-turn-steering-unavailable', fallback: 'existing-next-turn-courier' };

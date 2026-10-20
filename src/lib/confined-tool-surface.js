@@ -16,7 +16,7 @@ class ConfinedSurfaceRefusal extends Error {
 
 // Installation-owned state and endpoints; no caller-supplied local path.
 const CONTAINED = Object.freeze(new Set([
-  'a_ledger.file', 'agent.remove', 'agent.stop', 'agent.wait',
+  'fleet.control', 'a_ledger.file', 'agent.remove', 'agent.stop', 'agent.wait',
   'agent_comms.local_roster', 'agent_comms.send_local',
   'audit.status', 'audit.tail', 'audit.verify',
   'capability.find', 'ledger.read',
