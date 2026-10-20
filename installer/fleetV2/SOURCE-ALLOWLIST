@@ -19,6 +19,7 @@ config/model-endpoints.json
 config/settings-registry.json
 config/toolsenabled.policy.json
 docs/FLEET-V2-CONTROL.md
+docs/FLEET-V2-SETTINGS-APP-INVENTORY.json
 docs/FLEET-V2-SETUP.md
 docs/GEMINI-AUTH.md
 docs/HOST-ROLE-CONTROL.md
@@ -162,6 +163,7 @@ src/lib/fleet-v2-control-surface.js
 src/lib/fleet-v2-control.js
 src/lib/fleet-v2-descriptions.js
 src/lib/fleet-v2-message-policy.js
+src/lib/fleet-v2-observability.js
 src/lib/fleet-v2-resources.js
 src/lib/fleet-v2-scope-refresh.js
 src/lib/fleet-v2-settings.js
