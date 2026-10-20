@@ -126,6 +126,31 @@ test('standalone mediation spans permitted folders without widening confined or 
     assert.equal((await a('host.read_file', { path: file })).content, 'external change\n');
   });
 
+  await t.test('private host containers, aliases and relocated worker authentication files stay unreadable', async () => {
+    const worker = path.join(config.stateRoot, 'workers', 'synthetic-node');
+    fs.mkdirSync(worker, { recursive: true, mode: 0o700 });
+    for (const name of ['link-token', 'ordinary-private-note.txt']) {
+      const target = path.join(worker, name);
+      fs.writeFileSync(target, 'synthetic private fixture', { mode: 0o600 });
+      await assert.rejects(a('host.read_file', { path: target }), { code: 'HOST_PATH_FORBIDDEN' });
+    }
+    for (const target of [config.stateRoot, worker]) {
+      await assert.rejects(a('host.list_dir', { path: target }), { code: 'HOST_PATH_FORBIDDEN' });
+    }
+    const relocated = path.join(outside, 'second-installation');
+    fs.mkdirSync(relocated);
+    fs.writeFileSync(path.join(relocated, 'link-token'), 'synthetic second installation fixture');
+    await assert.rejects(a('host.read_file', { path: path.join(relocated, 'link-token') }), { code: 'HOST_PATH_FORBIDDEN' });
+    const alias = path.join(outside, 'ordinary-alias');
+    fs.symlinkSync(config.stateRoot, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      await assert.rejects(a('host.read_file', { path: path.join(alias, 'workers', 'synthetic-node', 'ordinary-private-note.txt') }),
+        { code: 'HOST_PATH_FORBIDDEN' });
+      await assert.rejects(a('host.list_dir', { path: alias }), { code: 'HOST_PATH_FORBIDDEN' });
+    } finally { fs.unlinkSync(alias); }
+    assert.equal((await a('host.read_file', { path: file })).content, 'external change\n');
+  });
+
   await t.test('a directory listing rechecks a downgrade after audit admission', async () => {
     const fileToolContext = contexts.createFileToolContext({ scopeKind: 'standalone-mcp' });
     const context = { fileToolContext, permissionSession: policy.effectiveSession(4) };
@@ -156,8 +181,8 @@ test('standalone mediation spans permitted folders without widening confined or 
   await t.test('authenticated Codex worker handoff follows the live tree and resolved sandbox', async () => {
     const { createOpenShellAgentHost, createOpenShellTreeClient } = fromEngine('src/lib/openshell-agent-host');
     const launches = [], sessions = [];
-    const names = ['host.read_file', 'host.write_file', 'host.patch_file', 'host.list_dir'];
-    let roleCap = 4;
+    const names = ['host.read_file', 'host.write_file', 'host.patch_file', 'host.list_dir', 'task.list'];
+    let roleCap = 4, launchedLevel = 4;
     const host = createOpenShellAgentHost({
       mode: 'host', env: { TOOLSENABLED_RUNTIME_MODE: 'host', TOOLSENABLED_HOST_WORKERS: '1' },
       rootSessionId: 'file-root', workspaceRoot: workspace, unrestrictedFileRoot: true,
@@ -170,8 +195,8 @@ test('standalone mediation spans permitted folders without widening confined or 
         admitChild: () => ({ roleId: 'worker', surface: { names } }), brief: ({ task }) => task },
       launcher: { async start(spec) {
         launches.push(spec);
-        const session = { threadId: `file-thread-${launches.length}`,
-          resolvedSandbox: { type: 'dangerFullAccess' },
+        const session = { threadId: `file-thread-${launches.length}`, level: launchedLevel,
+          resolvedSandbox: { type: launchedLevel === 1 ? 'readOnly' : 'dangerFullAccess' },
           adapter: { async sendTurn() { return { turnId: `file-turn-${launches.length}`, text: 'done' }; },
             async interrupt() {} }, close() {} };
         sessions.push(session); return session;
@@ -196,6 +221,21 @@ test('standalone mediation spans permitted folders without widening confined or 
       sessions[0].resolvedSandbox = { type: 'dangerFullAccess' };
       roleCap = 2; await assert.rejects(read());
       roleCap = 4; await read();
+      const child = await client.spawn({ tier: 'sol', role: 'worker', brief: 'Read the same synthetic file.' });
+      const childClient = createOpenShellTreeClient({ socketPath: path.join(root, 'synthetic-link'), sessionId: child.sessionId,
+        token: launches[1].linkToken, request: ({ token, op, request }) => host.handleLink(token, op, request) });
+      assert.equal((await childClient.fileAccess()).unrestricted, true);
+      for (const sandbox of [{ type: 'readOnly' }, { type: 'workspaceWrite' }, undefined]) {
+        sessions[0].resolvedSandbox = sandbox;
+        assert.equal((await client.fileAccess()).unrestricted, false);
+        assert.equal((await childClient.fileAccess()).unrestricted, false, 'A descendant cannot bypass its actual ancestor sandbox.');
+      }
+      sessions[0].resolvedSandbox = { type: 'dangerFullAccess' };
+      assert.equal((await childClient.fileAccess()).unrestricted, true);
+      launchedLevel = 1;
+      const narrowed = await host.spawn({ parentSessionId: 'file-root', tier: 'sol', role: 'worker', brief: 'Use the resolved read-only ceiling.' });
+      await host.spawn({ parentSessionId: narrowed.sessionId, tier: 'sol', role: 'worker', brief: 'Inherit that read-only ceiling.' });
+      assert.equal(launches.at(-1).level, 1, 'A descendant launch inherits the actual parent ceiling.');
       await assert.rejects(host.handleLink('invalid-token', 'file.access'), { code: 'OPENSHELL_TREE_LINK_REFUSED' });
       await host.command({ parentSessionId: 'file-root', action: 'stop-node', nodeId: node.nodeId });
       await assert.rejects(read(), { code: 'OPENSHELL_TREE_LINK_REFUSED' });

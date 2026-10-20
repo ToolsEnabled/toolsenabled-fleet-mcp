@@ -1367,6 +1367,10 @@ function createOpenShellAgentHost({
         throw refusal('OPENSHELL_AGENT_START_UNAVAILABLE', `${node.displayName} was stopped while it was starting.`);
       }
       state.session = session;
+      // Native launchers may resolve a stricter sandbox than requested.
+      // Retain that effective ceiling for every subsequent descendant.
+      node.level = LEVELS.narrowest(node.level, session.level);
+      node.permissionContext = Object.freeze({ ...node.permissionContext, effectiveLevel: node.level });
       state.sessionModel = node.model;
       node.threadId = session.threadId;
       if (observation) launchPolicy.host.commitLaunch(observation.handle, session.threadId);
@@ -2092,15 +2096,18 @@ function createOpenShellAgentHost({
     if (op === 'comms.roster') return roster(request.args || {}, context);
     if (op === 'whoami') return Object.freeze({ nodeId: node.nodeId, sessionId: node.sessionId, displayName: node.displayName, role: node.role });
     if (op === 'file.access') {
-      const state = live.get(node.nodeId);
-      const nativeFull = driverOf(node.provider) !== 'app-server'
-        || state.session.resolvedSandbox?.type === 'dangerFullAccess';
-      const ancestorsLive = ancestorsOf(node).every(parent => running(parent) && live.get(parent.nodeId)?.session);
+      const fullChain = [node, ...ancestorsOf(node)].every(member => {
+        const state = live.get(member.nodeId);
+        return running(member) && state?.session && member.level === 4
+          && state.launchParentSessionId === (member.parentNodeId ? byId(member.parentNodeId)?.sessionId : rootSessionId)
+          && (driverOf(member.provider) !== 'app-server'
+            || state.session.resolvedSandbox?.type === 'dangerFullAccess');
+      });
       return Object.freeze({ nodeId: node.nodeId, sessionId: node.sessionId,
         unrestricted: mode === 'host' && unrestrictedFileRoot === true && !closing
           && permissionContext.verifiedParent === true && permissionContext.source === 'ancestor-cli'
           && rootLevel === 4 && recordedTier === 'unrestricted'
-          && node.level === 4 && levelOf(node) === 4 && ancestorsLive && nativeFull });
+          && node.level === 4 && levelOf(node) === 4 && fullChain });
     }
     throw refusal('OPENSHELL_TREE_LINK_INVALID', `The tree does not answer "${op}".`);
   }

@@ -178,6 +178,7 @@ function isCredentialShapedName(candidatePath) {
 
 function isCredentialProtectedPath(candidatePath) {
   return EXCLUDED_PATH_PATTERNS.some(pattern => pattern.test(candidatePath))
+    || /^link-token(?:$|[._-])/i.test(path.basename(candidatePath))
     || COMMON_CREDENTIAL_STORE_PATTERN.test(candidatePath)
     || isCredentialShapedName(candidatePath)
     || isProtectedEnvironmentPath(candidatePath);
@@ -633,17 +634,34 @@ function checkContainmentAndExclusions(candidatePath, { forWrite }) {
   }
 }
 
-// Keep runtime databases and signing state out of reads even when the person
-// chose a custom state root. The newer write-root guard above already protects
-// every write; compare both root names here so a directory alias cannot expose
-// the same state through its canonical path.
+// Keep private host containers and runtime signing/database state out of reads,
+// including custom locations and aliases. Resolve the selected root afresh as
+// well as the engine's cached root.
 function checkStateRoot(candidatePath, { forWrite }) {
   if (forWrite) return;
   let roots;
   try {
-    const root = path.resolve(require('../runtime-state-root').stateRoot());
-    roots = [root, canonicalizeForContainment(root)];
-  } catch { failCouldNotCheck('path against the engine\'s state root'); }
+    const runtime = require('../runtime-state-root');
+    const root = path.resolve(runtime.resolveStateRoot().root);
+    const cachedRoot = path.resolve(runtime.stateRoot());
+    if (process.env.TOOLSENABLED_RUNTIME_MODE === 'host') {
+      if (path.basename(root) !== 'capability' || path.dirname(root) === path.parse(root).root) {
+        failCouldNotCheck('host private state root');
+      }
+      const containers = [path.dirname(root),
+        ...(path.basename(cachedRoot) === 'capability' ? [path.dirname(cachedRoot)] : [])];
+      const protectedRoots = containers.flatMap(container => [container, canonicalizeForContainment(container)]);
+      const canonicalCandidate = canonicalizeForContainment(candidatePath);
+      if (protectedRoots.some(base =>
+        containsOrEquals(base, candidatePath) || containsOrEquals(base, canonicalCandidate))) {
+        fail('HOST_PATH_FORBIDDEN', 'Fleet private host state is never exposed through the host file tools.');
+      }
+    }
+    roots = [root, cachedRoot, canonicalizeForContainment(root), canonicalizeForContainment(cachedRoot)];
+  } catch (error) {
+    if (error.code === 'HOST_PATH_FORBIDDEN') throw error;
+    failCouldNotCheck('path against the engine\'s state root');
+  }
   for (const root of roots) {
     const relative = path.relative(root, candidatePath);
     if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;

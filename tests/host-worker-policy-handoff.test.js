@@ -19,7 +19,7 @@ function loadLauncher() {
   compiled._compile(source.replace(target, 'if (false)'), filename); return compiled.exports;
 }
 const { createHostWorkerLauncher } = loadLauncher();
-function fixture(t, observeThreadPolicyForLaunch = null) {
+function fixture(t, observeThreadPolicyForLaunch = null, resolvedSandbox = { type: 'dangerFullAccess' }) {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-policy-fixture-')); fs.chmodSync(stateRoot, 0o700);
   t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }));
   const calls = [];
@@ -27,7 +27,7 @@ function fixture(t, observeThreadPolicyForLaunch = null) {
     socketPath: path.join(stateRoot, 'fixture-socket'), env: { TOOLSENABLED_RUNTIME_MODE: 'host', TOOLSENABLED_HOST_WORKERS: '1',
       TOOLSENABLED_TOOL_ALLOWLIST: 'host.read_file', TOOLSENABLED_LEVEL_CAP: '4' },
     checkNative: () => {}, agentApiMode: () => 'Enabled', observeThreadPolicyForLaunch,
-    startCodex: async options => { calls.push(options); return { threadId: 'fixture-thread', resolvedSandbox: { type: 'dangerFullAccess' }, adapter: {}, close() {} }; }
+    startCodex: async options => { calls.push(options); return { threadId: 'fixture-thread', resolvedSandbox, adapter: {}, close() {} }; }
   });
   const spec = { provider: 'codex', level: 4, nodeId: 'fixture-node', sessionId: 'fixture-session', parentSessionId: 'fixture-parent',
     nodeFolder: path.join(stateRoot, 'fixture-node'), linkToken: 'synthetic-fixture-token' };
@@ -70,4 +70,17 @@ test('metadata in the private launch argument is explicitly refused before nativ
   await assert.rejects(f.launcher.start(f.spec, { launchObservation: { claimedTrusted: true } }), { code: 'HOST_WORKER_POLICY_OBSERVER_INVALID' });
   assert.equal(f.calls.length, 0);
   assert.deepEqual(fs.readdirSync(f.stateRoot), [], 'invalid private argument must not prepare worker capability files');
+});
+
+test('native sandbox matches the bound MCP ceiling; narrower or unknown launches refuse', async t => {
+  for (const [type, expected] of [['readOnly', 1], ['workspaceWrite', 2], ['dangerFullAccess', 2], ['workspaceWrite', 3], ['dangerFullAccess', 4]]) {
+    const f = fixture(t, null, { type });
+    assert.equal((await f.launcher.start({ ...f.spec, level: expected })).level, expected);
+  }
+  for (const [level, type] of [[2, 'readOnly'], [3, 'readOnly'], [4, 'readOnly'], [4, 'workspaceWrite']]) {
+    const f = fixture(t, null, { type });
+    await assert.rejects(f.launcher.start({ ...f.spec, level }), { code: 'HOST_WORKER_POLICY_NARROWED' });
+  }
+  const unknown = fixture(t, null, null);
+  await assert.rejects(unknown.launcher.start(unknown.spec), { code: 'HOST_WORKER_POLICY_WIDE' });
 });
