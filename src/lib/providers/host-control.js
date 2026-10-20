@@ -839,8 +839,10 @@ function readFileLegacy({ path: target } = {}, dependencies = {}) {
   const requireRecordAsync = dependencies.requireRecordAsync || auditAdmission.requireRecordAsync;
   const admitted = requireRecordAsync('host.read_file.intent', resolved, { bytes: opened.size });
   return admitted.then(
-    () => {
+    async () => {
       try {
+        await require('../host-file-access').refresh();
+        resolveHostPath(resolved, { mustExist: true });
         const again = fs.fstatSync(descriptor);
         if (again.ino !== opened.ino || again.dev !== opened.dev) {
           fail('HOST_FILE_CHANGED_DURING_READ', 'The file changed while it was being admitted; read it again.');
@@ -890,15 +892,18 @@ function writeFileLegacy({ path: target, content } = {}, dependencies = {}) {
   // the promise was created, not when the write actually finished.
   const requireRecordAsync = dependencies.requireRecordAsync || auditAdmission.requireRecordAsync;
   const admitted = requireRecordAsync('host.write_file.intent', resolved, { bytes: Buffer.byteLength(content, 'utf8') });
-  return admitted.then(() => withSharedWrite(canonicalTarget, () => {
-    // Audit admission yielded: recheck aliases and roots before publishing.
-    resolveHostPath(resolved, { forWrite: true });
-    fs.mkdirSync(path.dirname(resolved), { recursive: true });
-    const temp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(temp, content, 'utf8');
-    fs.renameSync(temp, resolved);
-    return { path: resolved, bytes: Buffer.byteLength(content, 'utf8') };
-  }));
+  return admitted.then(async () => {
+    await require('../host-file-access').refresh();
+    return withSharedWrite(canonicalTarget, () => {
+      // Audit admission yielded: recheck aliases and roots before publishing.
+      resolveHostPath(resolved, { forWrite: true });
+      fs.mkdirSync(path.dirname(resolved), { recursive: true });
+      const temp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(temp, content, 'utf8');
+      fs.renameSync(temp, resolved);
+      return { path: resolved, bytes: Buffer.byteLength(content, 'utf8') };
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

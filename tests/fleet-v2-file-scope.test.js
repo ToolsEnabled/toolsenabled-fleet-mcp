@@ -70,6 +70,22 @@ test('fleetV2 mediation follows exact live parent read/write roots independently
     live = { ...live, readRoots: [workspace, other], writeRoots: [other], revision: 3 };
     assert.equal((await call('host.read_file', { path: file })).content, 'changed\n');
   });
+  await t.test('unmediated reads and writes recheck revocation after audit admission', async () => {
+    const provider = require('../src/lib/providers/host-control');
+    process.env.TOOLSENABLED_HOST_BYTE_MEDIATION = 'off';
+    try {
+      for (const method of ['readFile', 'writeFile']) {
+        let admit;
+        const prepared = await access.prepare(context);
+        const pending = access.run(prepared, () => provider[method]({ path: file, content: 'must not publish' }, {
+          requireRecordAsync: () => new Promise(resolve => { admit = resolve; }) }));
+        live = { ...live, readRoots: [workspace], writeRoots: [], revision: live.revision + 1 };
+        admit(); await assert.rejects(pending, { code: 'FLEET_FOLDER_SCOPE_CHANGED' });
+        assert.equal(fs.readFileSync(file, 'utf8'), 'changed\n');
+        live = { ...live, readRoots: [workspace, other], writeRoots: [other], revision: live.revision + 1 };
+      }
+    } finally { delete process.env.TOOLSENABLED_HOST_BYTE_MEDIATION; }
+  });
   await t.test('a forged authority object and vendor plugin cannot select fleetV2 roots', async () => {
     const forged = { ...context, hostFileAuthorization: { resolveFolderScope: async () => live } };
     await assert.rejects(registry.executeTool('host.read_file', { path: file }, forged), { code: 'PERMISSION_CONFINED_WORKSPACE_REFUSED' });
