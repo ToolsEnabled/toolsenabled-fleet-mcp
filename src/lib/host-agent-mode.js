@@ -88,7 +88,12 @@ function workerToken(env, config) {
   const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0 || stat.size > 1024) {
+    if (process.platform === 'win32') {
+      const checked = require('./windows-state-security').assertEntry(filename, false);
+      if (checked.dev !== stat.dev || checked.ino !== stat.ino) throw refusal('HOST_WORKER_LINK_INVALID', 'The worker link file changed during validation.');
+    }
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 1024
+        || (process.platform !== 'win32' && (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0))) {
       throw refusal('HOST_WORKER_LINK_INVALID', 'The worker link file must be private and owned by you.');
     }
     const token = fs.readFileSync(fd, 'utf8').trim();

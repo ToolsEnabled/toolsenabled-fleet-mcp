@@ -15,3 +15,5 @@ This candidate is not a newly qualified runtime archive or a directory approval.
 
 Fleet is [MIT licensed](LICENSE); see [NOTICE](NOTICE),
 [third-party notices](THIRD-PARTY-LICENSES.md) and [security reporting](SECURITY.md).
+
+Native Windows host setup and release checks: [NATIVE-WINDOWS.md](docs/NATIVE-WINDOWS.md).

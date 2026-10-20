@@ -68,6 +68,8 @@ function readProcessTable({ procRoot = '/proc', fileSystem = fs } = {}) {
 /** The start time of one pid, or null when it no longer exists. */
 function processStartTime(pid, options = {}) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (process.platform === 'win32' && !options.fileSystem && !options.procRoot)
+    return require('../process-claim-lock').processStartIdentity(pid);
   const { procRoot = '/proc', fileSystem = fs } = options;
   try {
     const row = parseStat(fileSystem.readFileSync(path.join(procRoot, String(pid), 'stat'), 'utf8'));
@@ -123,6 +125,18 @@ async function terminateProcessTree({ pid, startTime = null } = {}, {
   ownGroup = safeOwnGroup(),
 } = {}) {
   if (!Number.isSafeInteger(pid) || pid < 2) return Object.freeze({ signalled: [], survivors: [] });
+  if (process.platform === 'win32') {
+    // A Windows PID tree is not containment. Only the registered Job Object
+    // with the exact original wrapper generation may be asked to terminate.
+    if (!/^win32:\d{12,20}$/.test(String(startTime)))
+      throw Object.assign(new Error('Windows cleanup requires the exact retained job generation.'), { code: 'WINDOWS_JOB_IDENTITY_INVALID' });
+    const current = processStartTime(pid);
+    if (current === null || current !== startTime) return Object.freeze({ signalled: [], survivors: [] });
+    const fileTime = (BigInt(startTime.slice(6)) - 504911232000000000n).toString();
+    const outcome = await require('../windows-job-control').terminateRegisteredJob(pid, { expectedStartTicks: fileTime });
+    if (outcome.activeProcesses !== 0) throw Object.assign(new Error('Windows cleanup did not prove an empty job.'), { code: 'WINDOWS_JOB_CLEANUP_UNPROVEN' });
+    return Object.freeze({ signalled: [pid], survivors: [] });
+  }
   const first = readTable();
   const leader = first.get(pid);
   const expected = startTime === null || startTime === undefined ? null : String(startTime);

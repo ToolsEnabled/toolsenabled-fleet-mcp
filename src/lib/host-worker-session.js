@@ -31,6 +31,12 @@ function privateFolder(folder, root) {
   if (!path.isAbsolute(root) || !path.isAbsolute(folder) || !within(root, folder)) {
     throw refusal('HOST_WORKER_PATH_INVALID', 'Worker files must stay in the private host state folder.');
   }
+  if (process.platform === 'win32') {
+    const security = require('./windows-state-security');
+    security.check('inspect', root);
+    security.check('create', folder);
+    return;
+  }
   fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
   if (fs.realpathSync(folder) !== path.resolve(folder)) throw refusal('HOST_WORKER_PATH_INVALID', 'Worker folders cannot cross links.');
   let cursor = folder;

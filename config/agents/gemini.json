@@ -11,7 +11,7 @@
   },
   "signIn": {
     "result": "unknown",
-    "how": "Sign in through the official gemini CLI. Google documents eligible personal AI Pro/Ultra sign-in, but Fleet has not qualified personal-subscription workers and some CLI/account combinations reject it. Google directs third-party coding agents to API-key or Vertex AI authentication; use a route permitted for your deployment. See docs/GEMINI-AUTH.md. Never copy or replay OAuth credentials. Personal Antigravity workers remain unsupported."
+    "how": "Use official Gemini CLI sign-in. Personal Pro/Ultra workers remain unqualified; Google directs third-party coding agents to API key or Vertex AI auth. Never copy OAuth credentials. For account/client eligibility errors, see docs/GEMINI-AUTH.md."
   },
   "register": {
     "kind": "command",

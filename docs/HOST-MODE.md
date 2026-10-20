@@ -1,5 +1,7 @@
 # ToolsEnabled Fleet host mode
 
+The native Windows candidate is documented in [NATIVE-WINDOWS.md](NATIVE-WINDOWS.md). Its archive requires separate native qualification.
+
 Host mode adds an explicit Linux x86_64 / WSL 2 entry for people who already use an agent CLI. It uses the same Fleet MCP broker, durable task and memory stores, inherited permission levels, and byte-mediated file tools as the OpenShell edition. Host mode is included in Fleet 1.9.1, published on [toolsenabled.ai](https://toolsenabled.ai). Consult the release for its exact archive and real CLI qualification results.
 
 Google currently documents personal Gemini CLI sign-in, including eligible AI Pro/Ultra accounts, but a reported CLI rejection and Fleet worker qualification are separate questions. Fleet does not claim that Google universally ended individual sign-in. For third-party-agent authentication, Google directs developers to API-key or Vertex AI routes. See [Gemini authentication and compatibility](GEMINI-AUTH.md) for the sources, observed failure and support limits. Personal Antigravity accounts are not supported as Fleet workers. Never copy or replay OAuth credentials.
