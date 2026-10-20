@@ -74,7 +74,9 @@ function run(context, callback) {
     ? { ...authorization, admittedScope: context.hostFolderScope, revoked: false } : authorization;
   return scope.run(active
     && session.origin === 'local' && session.tier === 'full'
-    && require('./providers/host-control').hostByteMediationEnabled()
+    // Turning byte coordination off must not disable the independent V2
+    // folder policy (including read-only protection inside the workspace).
+    && (active.resolveFolderScope || require('./providers/host-control').hostByteMediationEnabled())
     && !context?.researchAccess && context?.setupKind !== 'plugin' ? active : null, callback);
 }
 

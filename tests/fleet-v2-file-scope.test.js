@@ -46,6 +46,15 @@ test('fleetV2 mediation follows exact live parent read/write roots independently
     const alias = path.join(other, 'alias'); fs.symlinkSync(outside, alias);
     await assert.rejects(call('host.read_file', { path: path.join(alias, 'outside.txt') }), { code: 'FLEET_FOLDER_SCOPE_DENIED' });
   });
+  await t.test('disabling byte mediation cannot disable the independent folder boundary', async () => {
+    process.env.TOOLSENABLED_HOST_BYTE_MEDIATION = 'off';
+    try {
+      await assert.rejects(call('host.write_file', { path: path.join(workspace, 'not-writable.txt'), content: 'denied' }), { code: 'FLEET_FOLDER_SCOPE_DENIED' });
+      assert.equal((await call('host.read_file', { path: file })).content, 'changed\n');
+      await assert.rejects(call('host.read_file', { path: denied }), { code: 'FLEET_FOLDER_SCOPE_DENIED' });
+      assert.equal(fs.existsSync(path.join(workspace, 'not-writable.txt')), false);
+    } finally { delete process.env.TOOLSENABLED_HOST_BYTE_MEDIATION; }
+  });
   await t.test('a policy change during admission refuses before directory enumeration', async () => {
     let admit;
     const prepared = await access.prepare(context);
