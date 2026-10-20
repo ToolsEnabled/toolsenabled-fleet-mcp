@@ -577,7 +577,8 @@ async function waitForWorkerReports(args, context = {}) {
     throw Object.assign(new Error('Waiting on this computer\'s worker tree requires a local session.'), { code: 'TREE_DELEGATION_REFUSED' });
   }
   const parentSessionId = context.agentPrincipal?.sessionId;
-  return require('./agent-tree-spawn').waitOnTree({ parentSessionId, timeoutSeconds: args.timeoutSeconds, signal: context.signal });
+  return require('./agent-tree-spawn').waitOnTree({ parentSessionId, timeoutSeconds: args.timeoutSeconds,
+    reportId: args.reportId, offset: args.offset, limit: args.limit, signal: context.signal });
 }
 
 /* ONE HANDLER FOR THE THREE LIFECYCLE VERBS.
@@ -1002,7 +1003,7 @@ const CORE_TOOLS = [
     actor: ledgerActor,
     id: { type: 'string', minLength: 2, maxLength: 12, pattern: '^T[1-9]\\d{0,9}$', description: 'The task id returned by t_ledger.file, e.g. "T12".' }
   }, ['actor', 'id']), args => minorLedgerAgentControl.complete(args), {
-    effect: 'local-write', destructiveHint: false, idempotentHint: true, openWorldHint: false
+    effect: 'local-write', destructiveHint: false, idempotentHint: false, openWorldHint: false
   }),
   define('a_ledger.file', 'File one durable question for the person into the owner-request ledger; they answer it on the Ledger page whenever they get to it. This is NOT a live dialog -- it never blocks this turn and there is no reply channel here, so check back later or ask the person directly in chat if you need the answer now. For a yes/no question with a terminal reply channel, use system.ask; it may return pending.', schema({
     actor: ledgerActor,
@@ -1013,7 +1014,7 @@ const CORE_TOOLS = [
   }, ['actor', 'scope', 'words']), args => minorLedgerAgentControl.fileAsk(args), {
     effect: 'local-write', destructiveHint: false, idempotentHint: false, openWorldHint: false
   }),
-  define('host.read_file', 'Read one UTF-8 text file anywhere in the owner profile tree (up to 2 MiB), or a character-aligned startByte/endByte window of it. Inside an OpenShell sandbox one read returns at most 32 KiB; a longer file comes back truncated with nextStartByte to read next. Records a read receipt for exactly the bytes returned to this session; host.write_file and host.patch_file only change files whose content this session has read and that are still current. Credential locations (vault/, .ssh, .aws, .gnupg, the owned Chrome profile, DPAPI stores) are always refused.', schema({
+  define('host.read_file', 'Read one UTF-8 text file anywhere in the owner profile tree (up to 2 MiB), or a character-aligned startByte/endByte window of it. Binary/image inputs, known MIME mismatches and invalid UTF-8 refuse explicitly; no lossy binary text is returned. This tool does not render images: use an authorized image input or image reader if available. Inside an OpenShell sandbox one read returns at most 32 KiB; a longer file comes back truncated with nextStartByte to read next. Records a read receipt for exactly the bytes returned to this session; host.write_file and host.patch_file only change files whose content this session has read and that are still current. Credential locations (vault/, .ssh, .aws, .gnupg, the owned Chrome profile, DPAPI stores) are always refused.', schema({
     path: str('Absolute path inside the owner profile tree, or a path relative to the owner profile root. For a file in the agent workspace, pass its absolute path.'),
     startByte: { type: 'integer', minimum: 0, description: 'Optional inclusive byte offset; must fall on a UTF-8 character boundary. Omit both offsets to read the whole file.' },
     endByte: { type: 'integer', minimum: 0, description: 'Optional exclusive byte offset; defaults to the file length.' }
@@ -1168,8 +1169,11 @@ const CORE_TOOLS = [
   }, ['contract', 'tier']), (args, context) => spawnSubagent(args, context), {
     effect: 'local-write', destructiveHint: false, idempotentHint: false, approvalEligible: false, openWorldHint: false
   }),
-  define('agent.wait', 'Wait up to timeoutSeconds for a subagent report to reach this lead session. After agent.spawn, call this before telling the person a subagent is still running. After three timeouts, tell the person which subagents are still running and stop waiting. A report is delivered once. The tool never starts a model turn or subagent.', schema({
-    timeoutSeconds: integer('Maximum time to wait, from 1 through 60 seconds; defaults to 30.', { minimum: 1, maximum: 60 })
+  define('agent.wait', 'Wait up to timeoutSeconds for a subagent report to reach this session. Reports carry a preview of at most 12000 UTF-16 code units, truncated, fullLength, reportId and nextOffset. Pass reportId with offset and limit to read the retained full report, including after delivery or later turns; paging returns immediately and does not consume other reports. Only reports in your managed tree are readable. After agent.spawn, wait before telling the person a worker is still running; after three timeouts, report which workers remain. The tool never starts a model turn or subagent.', schema({
+    timeoutSeconds: integer('Maximum time to wait, from 1 through 60 seconds; defaults to 30.', { minimum: 1, maximum: 60 }),
+    reportId: { type: 'string', minLength: 36, maxLength: 36, description: 'Retained report ID returned by Fleet. Omit to wait for new reports.' },
+    offset: integer('UTF-16 code-unit offset; use 0 or the preceding nextOffset.', { minimum: 0 }),
+    limit: integer('Maximum code units per page, from 2 through 4000; defaults to 4000.', { minimum: 2, maximum: 4000 })
   }), (args, context) => waitForWorkerReports(args, context), {
     effect: 'local-write', destructiveHint: false, idempotentHint: false, approvalEligible: false, openWorldHint: false
   }),
@@ -1180,6 +1184,27 @@ const CORE_TOOLS = [
   }, ['nodeId', 'model']), (args, context) => treeConfiguration('model', args, context), {
     effect: 'local-write', destructiveHint: false, idempotentHint: false, approvalEligible: false, openWorldHint: false
   }),
+  define('agent.set_speed', "Choose standard or fast speed on a managed live descendant through its adapter capability. Applies on the next turn without stopping or restarting the session, changing model/effort, or modifying login. Fast can cost more; use only within the person's authorization. Unsupported adapters refuse. The receipt separates requested/submitted speed from effective speed, which remains unknown without provider evidence.", schema({
+    nodeId: { type: 'string', minLength: 1, maxLength: 200 },
+    speed: choice(['standard', 'fast'], 'Requested speed; Ultrafast is not supported by this control.'),
+    expectedSessionId: { type: 'string', minLength: 1, maxLength: 200 }
+  }, ['nodeId', 'speed']), (args, context) => treeConfiguration('speed', args, context), {
+    effect: 'local-write', destructiveHint: false, idempotentHint: true, approvalEligible: false, openWorldHint: false
+  }),
+  define('agent.continue', 'Enroll a running descendant in continuation over exact owner T-ledger tasks already assigned to that node. File tree/thread tasks with key=nodeId first. No global backlog pickup, new worker, permission grant, or restart occurs. Completed turns pick the next eligible task; three unchanged attempts hold that task. Failed/interrupted turns and approval interactions pause. State survives restart without blind replay; reconcile interrupted work before a new runId. Repeat a runId safely to inspect it without resetting it. Set enabled:false to disable future turns (agent.stop interrupts a current turn).', schema({
+    nodeId: { type: 'string', minLength: 1, maxLength: 200 },
+    expectedSessionId: { type: 'string', minLength: 1, maxLength: 200 },
+    enabled: { type: 'boolean', description: 'Defaults true. False disables continuation without interrupting a current turn.' },
+    runId: { type: 'string', minLength: 1, maxLength: 96, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$' },
+    taskIds: { type: 'array', minItems: 1, maxItems: 100, uniqueItems: true, items: { type: 'string', pattern: '^T[1-9]\\d{0,9}$' } },
+    maxTurns: integer('Optional: stop after this many automatic turns. Omitted, there is no turn limit; the run continues until its tasks are done, held or blocked, or it is disabled or stopped.', { minimum: 1 })
+  }, ['nodeId']), (args, context) => {
+    if (require('./permission-tier-policy').session(context?.permissionSession).origin !== 'local')
+      throw Object.assign(new Error('Continuation is controlled only from this local tree.'), { code: 'TREE_DELEGATION_REFUSED' });
+    return treeConfiguration('continuation', { ...args, continuation: {
+      enabled: args.enabled, runId: args.runId, taskIds: args.taskIds, maxTurns: args.maxTurns
+    } }, context);
+  }, { effect: 'local-write', destructiveHint: false, idempotentHint: true, approvalEligible: false, openWorldHint: false }),
   define('agent.set_effort', "Choose supported effort for a managed slot's current model through the existing applied/pending control. Only descendants within the caller's managed scope are eligible. The same slot identity, draft, images, queue and accepted/unknown delivery holds are preserved. Returns applied, pending or a named refusal.", schema({
     nodeId: { type: 'string', minLength: 1, maxLength: 200, description: 'Managed descendant slot to configure.' },
     effort: { type: 'string', minLength: 1, maxLength: 32, description: 'Requested effort choice from the available choices for this slot.' },
@@ -1263,11 +1288,11 @@ const CORE_TOOLS = [
   }, ['queue']), args => tasks().claim(args), {
     effect: 'local-write', destructiveHint: false, idempotentHint: false
   }),
-  define('task.start', 'Atomically mark a leased task running immediately before work or I/O begins.', schema({
+  define('task.start', 'Atomically mark a leased task running immediately before work or I/O begins. Called again on a task you are already running, it renews the lease.', schema({
     handle: taskHandle,
     leaseSeconds: taskLeaseSeconds('Running lease from 30 through 900 seconds.')
   }, ['handle']), args => tasks().start(args), {
-    effect: 'local-write', destructiveHint: false, idempotentHint: true
+    effect: 'local-write', destructiveHint: false, idempotentHint: false
   }),
   define('task.heartbeat', 'Renew the current running task lease and observe cooperative cancellation.', schema({
     handle: taskHandle,
@@ -1358,6 +1383,8 @@ const P13_SEMANTIC_OVERRIDES = Object.freeze({
   'agent.restart': Object.freeze({ policyKind: 'recursive-delegation', targetKind: 'agent', generatedCode: false }),
   'agent.set_model': Object.freeze({ policyKind: 'recursive-delegation', targetKind: 'agent', generatedCode: false }),
   'agent.set_effort': Object.freeze({ policyKind: 'recursive-delegation', targetKind: 'agent', generatedCode: false }),
+  'agent.continue': Object.freeze({ policyKind: 'recursive-delegation', targetKind: 'agent', generatedCode: false }),
+  'agent.set_speed': Object.freeze({ policyKind: 'recursive-delegation', targetKind: 'agent', generatedCode: false }),
   'agent.set_provider': Object.freeze({ policyKind: 'recursive-delegation', targetKind: 'agent', generatedCode: false }),
   'agent.set_role': Object.freeze({ policyKind: 'recursive-delegation', targetKind: 'agent', generatedCode: false }),
   'agent.remove': Object.freeze({ policyKind: 'recursive-delegation', targetKind: 'agent', generatedCode: false })
@@ -2473,7 +2500,7 @@ async function executeToolWithinPolicy(name, args = {}, context = {}) {
       'system.ask', 'system.notify',
       'host.exec', 'host.read_file', 'host.write_file', 'host.patch_file', 'host.list_dir',
       'capability.find', 'agent_comms.send_local', 'agent_comms.local_roster',
-      'agent.spawn', 'agent.wait', 'agent.set_model', 'agent.set_effort', 'agent.set_provider',
+      'agent.spawn', 'agent.wait', 'agent.continue', 'agent.set_model', 'agent.set_effort', 'agent.set_speed', 'agent.set_provider',
       'agent.set_role', 'agent.stop', 'agent.resume', 'agent.restart', 'agent.remove'
     ].includes(entry.name);
     /* THE OWNER'S PER-CREDENTIAL SWITCHES ARE BOUND AROUND THE HANDLER, not

@@ -51,10 +51,14 @@ const UNCONFINABLE = Object.freeze(new Map([
   ['agent.set_role', 'changes a managed agent role and function surface without a confined role-change adapter']
 ]));
 
-const CLASSES = Object.freeze(['contained', 'workspace', 'unconfinable', 'tree-confined', 'tree-lifecycle-confined']);
+const CONFIGURATION_CONTROL = new Set(['agent.set_model', 'agent.set_effort', 'agent.set_role']);
+const CLASSES = Object.freeze(['contained', 'workspace', 'unconfinable', 'tree-confined', 'tree-lifecycle-confined', 'tree-speed-confined', 'tree-configuration-confined', 'tree-continuation-confined']);
 
 function classify(name) {
   if (typeof name !== 'string' || !name) return null;
+  if (name === 'agent.continue') return 'tree-continuation-confined';
+  if (CONFIGURATION_CONTROL.has(name)) return 'tree-configuration-confined';
+  if (name === 'agent.set_speed') return 'tree-speed-confined';
   if (name === 'agent.spawn') return 'tree-confined';
   if (name === 'agent.resume' || name === 'agent.restart') return 'tree-lifecycle-confined';
   if (CONTAINED.has(name)) return 'contained';
@@ -65,7 +69,7 @@ function classify(name) {
 
 function classifiedToolNames() {
   return Object.freeze([...CONTAINED, ...WORKSPACE_FENCED.keys(), ...UNCONFINABLE.keys(),
-    'agent.spawn', 'agent.resume', 'agent.restart'].sort());
+    'agent.spawn', 'agent.resume', 'agent.restart', 'agent.set_speed', 'agent.continue'].sort());
 }
 
 function fencedArgumentNames(name) {
@@ -79,6 +83,21 @@ function unconfinableReason(name) {
 
 function assertToolConfinable(name, { tier = 'confined', profile = null } = {}) {
   const decided = classify(name);
+  if (decided === 'tree-continuation-confined' && (profile !== 'workspace'
+      || !require('./tree-host-registry').supportsConfinedContinuationControl())) {
+    throw new ConfinedSurfaceRefusal('PERMISSION_CONFINED_UNCONFINABLE_REFUSED',
+      'Assigned-task continuation requires a compatible retained-tree host; workspace, role and task ownership stay enforced.', { tool: name, tier, profile });
+  }
+  if (decided === 'tree-configuration-confined' && (profile !== 'workspace'
+      || !require('./tree-host-registry').supportsConfinedConfigurationControl())) {
+    throw new ConfinedSurfaceRefusal('PERMISSION_CONFINED_UNCONFINABLE_REFUSED',
+      'Model, effort and role selection require a compatible host that retains workspace, provider and role authority.', { tool: name, tier, profile });
+  }
+  if (decided === 'tree-speed-confined' && (profile !== 'workspace'
+      || !require('./tree-host-registry').supportsConfinedSpeedControl())) {
+    throw new ConfinedSurfaceRefusal('PERMISSION_CONFINED_UNCONFINABLE_REFUSED',
+      'Speed selection requires a compatible host that preserves the existing workspace and execution policy.', { tool: name, tier, profile });
+  }
   if (decided === 'tree-lifecycle-confined' && (profile !== 'workspace'
       || !require('./tree-host-registry').supportsConfinedTreeLifecycle())) {
     throw new ConfinedSurfaceRefusal('PERMISSION_CONFINED_UNCONFINABLE_REFUSED',

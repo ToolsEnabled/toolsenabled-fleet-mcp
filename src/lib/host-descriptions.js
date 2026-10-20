@@ -65,7 +65,7 @@ function briefToolSummary({ tier, allowedNames, setupKind } = {}) {
       ? ['Use host.read_file before host.write_file or host.patch_file for coordinated edits. Shell and native file edits do not participate in byte mediation.']
       : []),
     setupKind === 'plugin'
-      ? 'If a tool is absent, say so. The person sets up this Claude Code plugin with /tefleet setup in the current project. Use settings.read and ledger.read to inspect its saved settings and ledger records.'
+      ? 'If a tool is absent, say so. The person configures this package from its installed folder with node bin/toolsenabled-host.js setup --plugin and the workspace, state-root and tier options in its setup guide (CODEX.md for the Codex package). Use settings.read and ledger.read to inspect its saved settings and ledger records.'
       : 'If a tool is absent, say so. The person manages this installation using the installed toolsenabled command: toolsenabled status, toolsenabled settings and toolsenabled ledger.'
   ].join('\n') };
 }

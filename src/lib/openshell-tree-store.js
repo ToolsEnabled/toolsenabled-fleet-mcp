@@ -125,36 +125,102 @@ function readOwner(ownerFile) {
  * Take the tree for one root, the base key or the first free one after it.
  * Returns the paths, the loaded (or new) document, and a release function.
  */
-function acquireTree({ stateRoot, baseKey, root, now = () => new Date().toISOString() }) {
+function acquireTree({ stateRoot, baseKey, root, preferredKey = null, now = () => new Date().toISOString() }) {
   if (!KEY.test(baseKey || '')) throw refusal('OPENSHELL_TREE_KEY_INVALID', 'An agent tree is named by a lowercase key.');
-  const base = privateFolder(treeFolder(stateRoot));
-  for (let index = 1; index <= MAX_KEYS_PER_ROOT; index += 1) {
-    const treeKey = index === 1 ? baseKey : `${baseKey}-${index}`;
+  const keys = Array.from({ length: MAX_KEYS_PER_ROOT }, (_, index) => index === 0 ? baseKey : `${baseKey}-${index + 1}`);
+  if (preferredKey !== null && (typeof preferredKey !== 'string' || !KEY.test(preferredKey) || !keys.includes(preferredKey))) {
+    throw refusal('OPENSHELL_TREE_KEY_INVALID', 'The selected tree must be an existing key in this root agent family.');
+  }
+  const explicit = preferredKey !== null;
+  // An explicit resume never creates folders, moves malformed history aside,
+  // chooses another actor, or silently allocates an empty replacement tree.
+  const base = explicit ? treeFolder(stateRoot) : privateFolder(treeFolder(stateRoot));
+  for (const treeKey of explicit ? [preferredKey] : keys) {
     const folder = path.join(base, treeKey);
     const ownerFile = path.join(folder, 'owner.json');
-    if (ownerAlive(readOwner(ownerFile))) continue;
-    privateFolder(folder);
-    const owner = { pid: process.pid, startTime: groups.processStartTime(process.pid), since: now() };
-    writePrivateJson(ownerFile, owner);
-    // Two servers starting at the same moment: the later write wins the file,
-    // and the earlier one moves on to the next key.
-    const confirmed = readOwner(ownerFile);
-    if (!confirmed || confirmed.pid !== process.pid) continue;
-    const document = loadTreeDocument(path.join(folder, 'tree.json'), { treeKey, root, now });
-    document.treeKey = treeKey;
-    document.root = { ...(document.root || {}), ...root };
-    return {
-      treeKey,
-      folder,
-      treeFile: path.join(folder, 'tree.json'),
-      socketPath: path.join(folder, 'link.sock'),
-      nodeFolder: nodeId => path.join(folder, 'nodes', nodeId),
-      document,
-      release() {
-        const current = readOwner(ownerFile);
-        if (current && current.pid === process.pid) fs.rmSync(ownerFile, { force: true });
-      },
+    const treeFile = path.join(folder, 'tree.json');
+    let selected = null;
+    if (explicit) {
+      try {
+        if (fs.realpathSync(folder) !== folder || !fs.lstatSync(folder).isDirectory()) {
+          throw refusal('OPENSHELL_TREE_PATH_INVALID', 'The selected tree must be a direct existing folder.');
+        }
+        const stat = fs.lstatSync(treeFile);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+          throw refusal('OPENSHELL_TREE_PATH_INVALID', 'The selected tree record must be a direct regular file.');
+        }
+        selected = readJson(treeFile);
+      } catch (error) {
+        if (error.code === 'ENOENT') throw refusal('OPENSHELL_TREE_NOT_FOUND', 'The selected tree does not exist. Nothing was allocated.');
+        throw error;
+      }
+      if (!usableDocument(selected) || selected.treeKey !== treeKey) {
+        throw refusal('OPENSHELL_TREE_UNREADABLE', 'The selected tree is not a valid existing tree. Its record was preserved.');
+      }
+      if (!root || typeof root.agentId !== 'string' || root.agentId !== baseKey || !selected.root || selected.root.agentId !== root.agentId
+          || (selected.root.actor || null) !== (root.actor || null)) {
+        throw refusal('OPENSHELL_TREE_ROOT_MISMATCH', 'The selected tree belongs to a different root identity. No actor was inferred or changed.');
+      }
+      let stat;
+      try { stat = fs.lstatSync(ownerFile); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)) {
+        throw refusal('OPENSHELL_TREE_PATH_INVALID', 'The selected owner record must be a direct regular file.');
+      }
+    }
+    const isHeld = () => {
+      const owner = explicit ? readJson(ownerFile) : readOwner(ownerFile);
+      if (explicit && owner && (!Number.isSafeInteger(owner.pid) || owner.pid < 1)) {
+        throw refusal('OPENSHELL_TREE_UNREADABLE', 'The selected tree owner record is invalid and was preserved.');
+      }
+      return ownerAlive(owner) || Boolean(explicit && owner?.pid === process.pid
+        && groups.sameProcessAlive(owner.pid, owner.startTime));
     };
+    if (isHeld()) {
+      if (explicit) throw refusal('OPENSHELL_TREE_BUSY', 'The selected tree is still held by a running server. Drain and close that server first.');
+      continue;
+    }
+    if (!explicit) privateFolder(folder);
+    let claim;
+    try {
+      // Serialize the ownership check/write across current automatic and
+      // explicit starters. Reuse the reviewed crash-safe nonce claim primitive.
+      claim = require('./process-claim-lock').acquireLock(path.join(folder, 'ownership-claim.json'));
+    } catch (error) {
+      if (error.code !== 'AGENT_DIGEST_ALREADY_RUNNING') throw error;
+      if (explicit) throw refusal('OPENSHELL_TREE_BUSY', 'Another server is acquiring the selected tree. Nothing was allocated.');
+      continue;
+    }
+    try {
+      if (isHeld()) {
+        if (explicit) throw refusal('OPENSHELL_TREE_BUSY', 'The selected tree is held by a running server. Nothing was allocated.');
+        continue;
+      }
+      if (explicit && (fs.realpathSync(folder) !== folder
+          || fs.lstatSync(treeFile).isSymbolicLink()
+          || JSON.stringify(readJson(treeFile)) !== JSON.stringify(selected))) {
+        throw refusal('OPENSHELL_TREE_CHANGED', 'The selected tree changed while it was being acquired. Its history was preserved; retry selection.');
+      }
+      const owner = { pid: process.pid, startTime: groups.processStartTime(process.pid), since: now() };
+      writePrivateJson(ownerFile, owner);
+      const confirmed = readOwner(ownerFile);
+      if (!confirmed || confirmed.pid !== process.pid) {
+        if (explicit) throw refusal('OPENSHELL_TREE_BUSY', 'The selected tree ownership changed during startup. Nothing was allocated.');
+        continue;
+      }
+      const document = selected || loadTreeDocument(treeFile, { treeKey, root, now });
+      if (!explicit) {
+        document.treeKey = treeKey;
+        document.root = { ...(document.root || {}), ...root };
+      }
+      return {
+        treeKey, folder, treeFile, socketPath: path.join(folder, 'link.sock'),
+        nodeFolder: nodeId => path.join(folder, 'nodes', nodeId), document,
+        release() {
+          const current = readOwner(ownerFile);
+          if (current && current.pid === process.pid && current.startTime === owner.startTime && current.since === owner.since) fs.rmSync(ownerFile, { force: true });
+        },
+      };
+    } finally { claim.release(); }
   }
   throw refusal('OPENSHELL_TREE_BUSY', `Every agent tree for ${baseKey} is held by a running server.`);
 }

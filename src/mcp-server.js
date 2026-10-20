@@ -312,7 +312,10 @@ function toolError(error) {
   const boundedSourceCode = error && typeof error.code === 'string'
     && Object.hasOwn(PUBLIC_SOURCE_MESSAGES, error.code) ? error.code : '';
   const boundedSourceMessage = boundedSourceCode === '' ? '' : exactPublicSourceMessage(error);
-  const details = { message: seatProviderConflict
+  const startupTimeout = error?.code === 'CODEX_START_TIMEOUT';
+  const details = { message: startupTimeout
+    ? 'Codex session startup timed out. In WSL, use a Linux-native CODEX_HOME and sign in there with codex login --device-auth. If startup is still slow, set TOOLSENABLED_CODEX_START_TIMEOUT_MS (1000 through 600000; default 60000) in Fleet\'s Linux process environment, then retry the retained worker.'
+    : seatProviderConflict
     ? 'Another active conversation uses this shared role with a different provider. Use its provider or choose a different role for this circle.'
     : boundedSourceCode !== '' ? (boundedSourceMessage || typed.safeSummary)
     : protectedTerminal ? typed.safeSummary : publicMessage(error) };
@@ -351,7 +354,7 @@ function toolError(error) {
    * sentence. This exception must not include terminal provider/security
    * failures merely because those are also non-retryable. The taxonomy block
    * remains unchanged and carries no source message. */
-  const text = boundedSourceCode !== ''
+  const text = startupTimeout || boundedSourceCode !== ''
     ? details.message
     : typed.retryable === false && !protectedTerminal && typeof details.message === 'string' && details.message !== ''
       ? details.message
@@ -360,8 +363,9 @@ function toolError(error) {
   // deliberately closed: arbitrary provider codes (or diagnostic details)
   // must not become a new text channel. This is an identifier, not authority
   // to retry a refused lifecycle operation or bypass its admission checks.
-  const publicCode = !protectedTerminal && details.code === 'TREE_DELEGATION_REFUSED'
-    ? { code: 'TREE_DELEGATION_REFUSED' } : ownerPrompt;
+  const publicCode = startupTimeout ? { code: 'CODEX_START_TIMEOUT' }
+    : !protectedTerminal && details.code === 'TREE_DELEGATION_REFUSED'
+      ? { code: 'TREE_DELEGATION_REFUSED' } : ownerPrompt;
   const contentText = publicCode ? `${text}\n${JSON.stringify(publicCode)}` : text;
   return {
     content: [{ type: 'text', text: coordination ? `${contentText}\n${JSON.stringify({ coordination })}` : contentText }],
@@ -624,7 +628,7 @@ async function dispatch(message, options = {}) {
       result.instructions = [instructions, require('./lib/openshell-authority').NOTE].filter(Boolean).join(' ');
     }
     if (options.recordMcpRevision !== false) {
-      require('./lib/mcp-revisions').record(options.agentActor || process.env.TOOLSENABLED_AGENT_ACTOR, params, result.protocolVersion);
+      require('./lib/mcp-revisions').record((Object.hasOwn(options, 'agentActor') ? options.agentActor : process.env.TOOLSENABLED_AGENT_ACTOR), params, result.protocolVersion);
     }
     return result;
   }
@@ -656,7 +660,7 @@ async function dispatch(message, options = {}) {
     }
     const suppliedArgs = params.arguments === undefined ? {} : params.arguments;
     if (!suppliedArgs || typeof suppliedArgs !== 'object' || Array.isArray(suppliedArgs)) throw new RpcError(-32602, 'tools/call params.arguments must be an object.');
-    const agentActor = options.agentActor || process.env.TOOLSENABLED_AGENT_ACTOR || undefined;
+    const agentActor = Object.hasOwn(options, 'agentActor') ? options.agentActor : (process.env.TOOLSENABLED_AGENT_ACTOR || undefined);
     const agentId = boundAgentId(options);
     const args = bindAgentActor(canonicalName, suppliedArgs, agentActor);
     try {
@@ -727,12 +731,47 @@ function parseLine(line, write) {
 }
 
 async function processMessage(message, write, options = {}) {
+  let boundary = null;
+  const ownedHost = require('./lib/tree-host-registry').treeSpawnHost();
+  const sessionId = options.agentSessionId || options.agentPrincipal?.sessionId;
+  const boundaryHook = typeof options.controlBoundary === 'function' ? options.controlBoundary
+    : ownedHost?.controlDeliveryVersion === 1 && ownedHost.isTreeSession(sessionId)
+      ? request => ownedHost.controlBoundary({ ...request, parentSessionId: sessionId }) : null;
+  const protectedWork = !['initialize', 'tools/list', 'ping'].includes(message?.method);
   try {
+    if (boundaryHook && message?.method === 'tools/call' && !Object.hasOwn(message, 'id'))
+      throw new RpcError(-32600, 'CONTROL_MCP_REQUEST_REQUIRED: tools/call needs a request ID before protected work.');
+    if (boundaryHook && message && Object.hasOwn(message, 'id')) {
+      // Only these protocol/liveness methods bypass work admission. Caller
+      // tool arguments cannot supply this classifier or a control callback.
+      try { boundary = await boundaryHook({ phase: 'begin', requestId: message.id, protectedWork }); }
+      catch (error) {
+        if (protectedWork) throw new RpcError(-32000, 'CONTROL_BOUNDARY_REFUSED: ' + (error.code || 'unknown'));
+        boundary = { status: 'unsupported', reason: error.code || 'CONTROL_BOUNDARY_UNAVAILABLE',
+          scope: 'protocol-discovery-only', providerAcknowledged: false };
+      }
+    }
     const result = await dispatch(message, options);
+    let delivery = boundary;
+    if (boundary?.boundaryId) {
+      const failed = result?.isError === true ? new AbortController() : null;
+      if (failed) failed.abort();
+      try { delivery = await boundaryHook({ phase: 'end', boundaryId: boundary.boundaryId, signal: failed?.signal || options.signal }); }
+      catch (error) { delivery = { status: 'unknown', reason: error.code || 'CONTROL_BOUNDARY_UNAVAILABLE' }; }
+      boundary = null;
+    }
     if (Object.prototype.hasOwnProperty.call(message, 'id')) {
-      write({ jsonrpc: '2.0', id: message.id, result: result === undefined ? {} : result });
+      const reply = result === undefined ? {} : result;
+      write({ jsonrpc: '2.0', id: message.id, result: delivery && reply && typeof reply === 'object'
+        ? { ...reply, controlDelivery: delivery } : reply });
     }
   } catch (error) {
+    if (boundary?.boundaryId) {
+      // A failed/cancelled operation still settles its protection boundary,
+      // without submitting queued steering after that failure.
+      const aborted = new AbortController(); aborted.abort();
+      try { await boundaryHook({ phase: 'end', boundaryId: boundary.boundaryId, signal: aborted.signal }); } catch { /* original typed refusal wins */ }
+    }
     const hasId = message && typeof message === 'object' && !Array.isArray(message) && Object.prototype.hasOwnProperty.call(message, 'id');
     const invalidRequest = error instanceof RpcError && error.code === -32600;
     if (hasId || invalidRequest) write(errorResponse(hasId ? message.id : null, error));
@@ -915,14 +954,22 @@ function degradedFailClosedSession(error, permissionTierPolicy, agentConfinement
   });
 }
 
+function transportActorOptions(startOptions = {}, env = process.env) {
+  const candidate = Object.hasOwn(startOptions, 'agentActor') ? startOptions.agentActor : env.TOOLSENABLED_AGENT_ACTOR;
+  const actor = typeof candidate === 'string' ? candidate.trim().toLowerCase() : null;
+  if (actor && !AGENT_ACTOR_VALUES.has(actor)) throw new RpcError(-32602, 'The startup actor is not a described agent or local model.');
+  return Object.freeze({ ...startOptions, agentActor: actor || null });
+}
+
 function start(startOptions = {}) {
+  const launchOptions = transportActorOptions(startOptions);
   /* INSIDE AN OPENSHELL SANDBOX, WITH AGENTS ASKED FOR, this transport is part
    * of the sandbox's agent tree (src/lib/openshell-agent-host.js): the root
    * that holds the tree and its workers, or one worker's own server bound to
    * that root. The sandbox, not this process, is the boundary in that mode.
    * Off everywhere else, so the desktop stdio broker is unchanged. */
   const openShell = require('./lib/openshell-agent-host').startOpenShellAgentMode();
-  const options = openShell === null ? startOptions : { ...startOptions, ...openShell.context };
+  const options = openShell === null ? launchOptions : Object.freeze({ ...launchOptions, ...openShell.context });
   if (openShell !== null) {
     /* A root that is told to end still stops its workers first: they lead
      * process groups of their own, so nothing else would. Bounded, then gone. */
@@ -1038,5 +1085,5 @@ module.exports = {
   openLastWords, writeLastWords,
   bindAgentActor, boundAgentId, classifyMessage, createLineDispatcher, dispatch, errorResponse, underscoreWireAliases, underscoreWireTools, installTierOfSession, processLine, processMessage, publicMessage, resolveUnderscoreWireName,
   recordMcpSurface, resolvePermissionSession, sessionInstructions, snapshotAllowedToolNames,
-  start, toolError, toolResult
+  start, transportActorOptions, toolError, toolResult
 };

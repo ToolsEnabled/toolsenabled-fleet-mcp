@@ -1,6 +1,6 @@
 {
   "name": "toolsenabled-fleet-mcp",
-  "version": "1.9.0",
+  "version": "1.9.2-rc.1",
   "description": "Independent Fleet MCP workers-off Standard-tier coordination core for Codex.",
   "author": {
     "name": "ToolsEnabled, Inc.",

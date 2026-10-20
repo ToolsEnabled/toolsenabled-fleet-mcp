@@ -73,24 +73,26 @@ async function readInWindows(call, file, limit = 50) {
   return windows;
 }
 
-test('a long file holding bytes that are not UTF-8 (Latin-1 text, binary) is read to its end in windows, as a short one is read whole', async (t) => {
+test('long non-UTF8/binary inputs refuse explicitly while valid UTF8 text remains readable to its end', async (t) => {
   const { call, refusal } = sandboxCaller(t);
   // "café" saved as Latin-1 in the first and the second 32 KiB window.
   const latin1 = Buffer.alloc(40000, 0x61);
   latin1.write('café ', 1000, 'latin1');
   latin1.write('café ', 35000, 'latin1');
   fs.writeFileSync(work('latin1.txt'), latin1);
-  const windows = await readInWindows(call, work('latin1.txt'));
-  assert.ok(windows.length >= 2);
-  assert.equal(windows.at(-1).endByte, latin1.length);
-  const text = windows.map((window) => window.content).join('');
-  assert.equal(text, latin1.toString('utf8'), 'the same text a whole-file read gives, U+FFFD where a byte is not UTF-8');
-  assert.equal(text.split('caf� ').length, 3);
+  const latin1Refusal = await refusal('host.read_file', { path: work('latin1.txt') });
+  assert.equal(latin1Refusal.code, 'HOST_FILE_TEXT_ENCODING_UNSUPPORTED');
+  assert.doesNotMatch(latin1Refusal.text, /\uFFFD/);
   // Every byte value, as in a binary file.
   const binary = Buffer.from(Array.from({ length: 40000 }, (_, i) => (i * 7919) % 256));
   fs.writeFileSync(work('binary.dat'), binary);
-  const binaryWindows = await readInWindows(call, work('binary.dat'));
-  assert.equal(binaryWindows.at(-1).endByte, binary.length);
+  assert.equal((await refusal('host.read_file', { path: work('binary.dat') })).code, 'HOST_FILE_BINARY_UNSUPPORTED');
+  const text = 'déjà vu 日本語 😀\n'.repeat(4000);
+  fs.writeFileSync(work('long-utf8.txt'), text);
+  const windows = await readInWindows(call, work('long-utf8.txt'));
+  assert.ok(windows.length >= 2);
+  assert.equal(windows.at(-1).endByte, Buffer.byteLength(text));
+  assert.equal(windows.map(window => window.content).join(''), text);
   // A window that starts or ends inside a real character is still refused.
   fs.writeFileSync(work('accents.txt'), 'déjà vu\n');
   for (const [startByte, endByte] of [[2, 6], [0, 2]]) {

@@ -192,6 +192,10 @@ function classifySourceCode(code, status, timedOut, matches) {
   if (['HOST_FILE_CHANGED_BEFORE_WRITE', 'HOST_FILE_IDENTITY_CHANGED'].includes(code)) return 'EXTERNAL_CHANGE';
   if (code === 'HOST_FILE_CHANGED_DURING_READ') return 'STALE_DATA';
   if (['HOST_FILE_PATCH_MISMATCH', 'HOST_FILE_PATCH_AMBIGUOUS'].includes(code)) return 'INVALID_REQUEST';
+  // Content refusals have bounded, actionable format guidance. Preserve it
+  // across MCP rather than describing an unsupported input as an engine fault.
+  if (['HOST_FILE_BINARY_UNSUPPORTED', 'HOST_FILE_MIME_MISMATCH',
+    'HOST_FILE_MALFORMED_IMAGE', 'HOST_FILE_TEXT_ENCODING_UNSUPPORTED'].includes(code)) return 'INVALID_REQUEST';
   if (code === 'HOST_BYTE_MEDIATION_OFF') return 'POLICY_DENIED';
   // Exact exception: this 403 is an organisation-policy decision, not an
   // expired sign-in. Keep every other historical 403 on the existing path.
@@ -329,7 +333,7 @@ function classifySourceCode(code, status, timedOut, matches) {
   if (['ACP_MODEL_UNAVAILABLE', 'ACP_MODE_UNAVAILABLE', 'ACP_EFFORT_UNAVAILABLE'].includes(code)) return 'INVALID_REQUEST';
   // A worker that cannot start because its CLI is out of date or incompatible: the person can act on
   // Fleet's own sentence (update the CLI), which "try again later" hid (the plugin's e815bf6).
-  if (['CLAUDE_CLI_UPDATE_NEEDED', 'CODEX_CLI_INCOMPATIBLE'].includes(code)) return 'INPUT_REQUIRED';
+  if (['CLAUDE_CLI_UPDATE_NEEDED', 'CODEX_CLI_INCOMPATIBLE', 'CODEX_START_TIMEOUT'].includes(code)) return 'INPUT_REQUIRED';
   // A worker that calls agent.wait must learn that its reports arrive as its
   // next turn. As INTERNAL_ERROR it read "internal error" and polled instead.
   if (code === 'AGENT_WAIT_ROOT_ONLY') return 'POLICY_DENIED';

@@ -7,7 +7,7 @@ const TOOL_NAME = /^[a-z0-9_]+(?:\.[a-z0-9_]+)+$/;
 const MAX_FUNCTIONS = 2048;
 // New managed-slot controls are explicit opt-ins, including for old saved null
 // policies. Updating shipped defaults must never grant them to a custom role.
-const SLOT_CONFIGURATION_FUNCTIONS = Object.freeze(['agent.set_model', 'agent.set_effort', 'agent.set_provider', 'agent.set_role']);
+const SLOT_CONFIGURATION_FUNCTIONS = Object.freeze(['agent.continue', 'agent.set_model', 'agent.set_effort', 'agent.set_speed', 'agent.set_provider', 'agent.set_role']);
 const EXPLICIT_GRANT_SET = new Set(SLOT_CONFIGURATION_FUNCTIONS);
 function invalid(message) {
   throw Object.assign(new Error(message), { code: 'ROLE_FUNCTIONS_INVALID' });

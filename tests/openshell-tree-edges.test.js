@@ -25,6 +25,55 @@ const { CONTRACT, scratch, settle, standIns, treeModes } = require('./lib/opensh
 const { startMode, workerServer, closeAll } = treeModes();
 test.afterEach(closeAll);
 
+test('long reports are retained, paged without loss and still readable after delivery and restart', async () => {
+  const stand = standIns();
+  const stateRoot = scratch(), workspace = scratch();
+  const mode = startMode(stand, { stateRoot, workspace });
+  await mode.ready;
+  await executeTool('agent.spawn', { contract: CONTRACT, tier: 'luna', surface: 'tree' }, mode.context);
+  const full = 'a'.repeat(11999) + '🙂' + 'complete report, including the final finding. '.repeat(400);
+  stand.last().finish(full);
+  await settle();
+  const receipt = (await executeTool('agent.wait', {}, mode.context)).reports[0];
+  assert.equal(receipt.truncated, true);
+  assert.equal(receipt.fullLength, full.length);
+  assert.equal(receipt.nextOffset, 11999);
+  assert.equal(receipt.text, full.slice(0, 11999));
+  assert.equal(mode.host.list()[0].lastTurn.reportId, receipt.reportId);
+  const persisted = JSON.parse(fs.readFileSync(path.join(stateRoot, 'openshell-tree', mode.treeKey, 'tree.json')));
+  assert.equal(persisted.workerReports.find(r => r.reportId === receipt.reportId).text, full);
+  let rebuilt = '', offset = 0;
+  do {
+    const page = await executeTool('agent.wait', { reportId: receipt.reportId, offset, limit: 2000 }, mode.context);
+    rebuilt += page.text;
+    offset = page.nextOffset;
+  } while (offset !== null);
+  assert.equal(rebuilt, full);
+  await assert.rejects(executeTool('agent.wait', { reportId: receipt.reportId, offset: full.length + 1 }, mode.context), { code: 'AGENT_REPORT_INVALID' });
+  await assert.rejects(executeTool('agent.wait', { reportId: receipt.reportId, offset: 12000 }, mode.context), { code: 'AGENT_REPORT_INVALID' });
+  await assert.rejects(executeTool('agent.wait', { reportId: '00000000-0000-0000-0000-000000000000' }, mode.context), { code: 'AGENT_REPORT_UNAVAILABLE' });
+  await closeAll();
+  const resumed = startMode(standIns(), { stateRoot, workspace });
+  await resumed.ready;
+  const page = await executeTool('agent.wait', { reportId: receipt.reportId, offset: full.length - 7 }, resumed.context);
+  assert.equal(page.text, full.slice(-7));
+  assert.equal(page.nextOffset, null);
+});
+
+test('a sibling cannot retrieve another workers retained report', async () => {
+  const stand = standIns();
+  const mode = startMode(stand);
+  await mode.ready;
+  await executeTool('agent.spawn', { contract: CONTRACT, tier: 'luna', surface: 'tree' }, mode.context);
+  const sibling = workerServer(mode, stand.last());
+  await executeTool('agent.spawn', { contract: CONTRACT, tier: 'luna', surface: 'tree' }, mode.context);
+  stand.last().finish('private report '.repeat(2000));
+  await settle();
+  const receipt = (await executeTool('agent.wait', {}, mode.context)).reports[0];
+  await assert.rejects(sibling.call('agent.wait', { reportId: receipt.reportId }),
+    error => ['AGENT_REPORT_UNAVAILABLE', 'TOOL_NOT_ENABLED'].includes(error.code));
+});
+
 test('a report says how a turn ended in the same words whichever CLI ran it', async () => {
   const stand = standIns();
   const mode = startMode(stand);

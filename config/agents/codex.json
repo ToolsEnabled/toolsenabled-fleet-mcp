@@ -88,6 +88,14 @@
         {
           "version": "0.160.0",
           "versionOutput": "codex-cli 0.160.0\n"
+        },
+        {
+          "version": "0.161.0",
+          "versionOutput": "codex-cli 0.161.0\n"
+        },
+        {
+          "version": "0.162.1",
+          "versionOutput": "codex-cli 0.162.1\n"
         }
       ],
       "args": [

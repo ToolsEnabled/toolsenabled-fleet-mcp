@@ -93,6 +93,10 @@ function read(relative) {
 }
 
 function listed(name) {
+  // A standalone public export contains no Claude plugin edition. If that
+  // edition is present, its manifest remains mandatory and unreadable files
+  // still fail the check; do not silently skip a broken manifest.
+  if (name === 'plugin' && !fs.existsSync(path.join(root, 'installer/claude-plugin'))) return [];
   return read(LISTS[name]).split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#'));
 }
 

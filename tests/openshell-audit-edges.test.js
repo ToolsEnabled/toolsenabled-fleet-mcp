@@ -30,5 +30,6 @@ test('audit.status and audit.tail on a truncated ledger say it could not be open
   const verified = await executeTool('audit.verify', {}, context);
   assert.deepEqual({ valid: verified.valid, error: verified.error }, { valid: false, error: 'The audit ledger could not be opened.' });
   assert.equal(toolError(Object.assign(new Error('SQLITE_CORRUPT: database disk image is malformed at /x'), { code: 'AUDIT_SQLITE_ERROR' })).content[0].text,
-    'The operation stopped safely because of an internal error.', 'other words under the same code stay private');
+    'The operation stopped safely because of an internal error. Check whether the action took effect before trying it again; if this keeps happening, report it to ToolsEnabled support with the time it happened.',
+    'other words under the same code stay private');
 });

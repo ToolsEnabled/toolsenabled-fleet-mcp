@@ -40,7 +40,7 @@ const { createHostWorkerLauncher } = require('../src/lib/host-worker-session');
 const { createWorkerLauncher } = require('../src/lib/openshell-worker-session');
 const { startAcpSession, resumeAcpSession } = require('../src/lib/agent-engine/acp-process');
 const { assertEngineAdapter } = require('../src/lib/agent-engine/engine-contract');
-const { createOpenShellAgentHost } = require('../src/lib/openshell-agent-host');
+const { createOpenShellAgentHost, openShellRoleHooks } = require('../src/lib/openshell-agent-host');
 const tiers = require('../src/lib/fleet-worker-tiers');
 test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
@@ -252,6 +252,37 @@ test('a failed ACP prompt tells the person why, in one short line without anythi
   });
 });
 
+// Found by the per-provider review of the Windows host line's Codex elicitation
+// fix: an ACP agent's request that Fleet does not offer ended the worker, as an
+// unsupported Codex request once did. It is answered "method not found" and the
+// turn carries on. Gemini CLI and OpenCode both use this driver.
+for (const mode of ['host', 'openshell']) test(`${mode}: an unsupported agent request is answered method-not-found and the session carries on`, async t => {
+  const f = setup(t, mode);
+  const session = await f.launcher.start(f.spec({ level: 4 }));
+  await session.adapter.sendTurn({ threadId: session.threadId, text: JSON.stringify({ kinds: ['read'], askFirst: true }) });
+  const answered = f.log().find(row => row.id === 'fixture-ask-1' && row.error);
+  assert.equal(answered.error.code, -32601);
+  const completed = f.events.filter(row => row.type === 'turn_completed').at(-1);
+  assert.equal(completed.status, 'end_turn');
+  assert.deepEqual(completed.payload?.unsupportedRequests, { count: 1, methods: ['_fixture/ask'] });
+  assert.equal(session.adapter.closed ?? null, null);
+  await session.adapter.sendTurn({ threadId: session.threadId, text: JSON.stringify({ kinds: ['read'] }) });
+  assert.equal(f.events.filter(row => row.type === 'turn_completed').at(-1).status, 'end_turn');
+});
+
+test('the tree says when it answered an unsupported agent request', async t => {
+  const f = setup(t);
+  const host = createOpenShellAgentHost({ mode: 'host', rootSessionId: 'root-fixture', workspaceRoot: f.root,
+    env: f.env, launcher: f.launcher, watchIntervalMs: 0, leadLevel: 4,
+    nodeFolder: id => path.join(f.config.stateRoot, 'nodes', id), persist() {} });
+  t.after(() => host.closeAll());
+  await host.spawn({ parentSessionId: 'root-fixture', tier: 'fixture-agent', role: 'worker',
+    brief: 'Read the fixture state. [[ask-first]]' });
+  await until(() => host.list()[0].turn === 'idle');
+  assert.equal(host.list()[0].state, 'running');
+  assert.match(host.list()[0].lastTurn.text, /answered a request from this worker's agent \(_fixture\/ask\) that a Fleet worker does not support/);
+});
+
 test('a failed ACP prompt still reports its permission denials and the next turn has a fresh report', async t => {
   const f = setup(t);
   const session = await f.launcher.start(f.spec({ level: 3 }));
@@ -299,8 +330,13 @@ for (const brief of ['exit-mid-turn', 'malformed-mid-turn']) {
 
 test('the tree relaunches the same ACP conversation when its model choice changes', { timeout: 15000 }, async t => {
   const f = setup(t);
+  // The lead holds the explicit agent.set_model grant, which the tree checks itself
+  // (Windows host line 863f68d).
+  const hooks = openShellRoleHooks({ env: f.env });
+  const roleHooks = { ...hooks, lead(allowed) { const lead = hooks.lead(allowed);
+    return { ...lead, surface: { ...lead.surface, names: [...lead.surface.names, 'agent.set_model'] } }; } };
   const host = createOpenShellAgentHost({ mode: 'host', rootSessionId: 'root-fixture', workspaceRoot: f.root,
-    env: f.env, launcher: f.launcher, watchIntervalMs: 0, leadLevel: 2,
+    env: f.env, launcher: f.launcher, watchIntervalMs: 0, leadLevel: 2, roleHooks,
     nodeFolder: id => path.join(f.config.stateRoot, 'nodes', id), persist() {} });
   t.after(() => host.closeAll());
   const worker = await host.spawn({ parentSessionId: 'root-fixture', tier: 'fixture-agent', role: 'worker', brief: 'Finish a fixture turn.' });
