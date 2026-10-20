@@ -380,7 +380,7 @@ async function terminateRegisteredJob(wrapperPid, {
 
 function wrapperArguments({
   pipeName, token, command, args, cwd, cleanupTimeoutMs, handshakeTimeoutMs, wrapperScript, assemblyCacheDirectory,
-  terminateDescendantsOnRootExit = false
+  terminateDescendantsOnRootExit = false, folderScope = null
 }) {
   const wrapperArgs = [
     '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
@@ -402,6 +402,7 @@ function wrapperArguments({
     wrapperArgs.push('-AssemblyCacheDirectoryBase64', encode(assemblyCacheDirectory));
   }
   if (terminateDescendantsOnRootExit) wrapperArgs.push('-TerminateDescendantsOnRootExit');
+  if (folderScope) wrapperArgs.push('-FolderScopeBase64', encode(JSON.stringify(folderScope)));
   return wrapperArgs;
 }
 
@@ -826,7 +827,8 @@ function spawnInJob(command, args = [], options = {}, dependencies = {}) {
       && typeof options.terminateDescendantsOnRootExit !== 'boolean') {
     fail('WINDOWS_JOB_INPUT_INVALID', 'terminateDescendantsOnRootExit must be true or false.');
   }
-  const { terminateDescendantsOnRootExit: ignoredRootExitOption, ...childOptions } = options;
+  const { terminateDescendantsOnRootExit: ignoredRootExitOption, folderScope: requestedFolderScope, ...childOptions } = options;
+  const folderScope = requestedFolderScope ? require('./fleet-folder-scope').normalize(requestedFolderScope) : null;
   if (platform !== 'win32') {
     return spawnImpl(command, args, {
       ...childOptions,
@@ -875,7 +877,7 @@ function spawnInJob(command, args = [], options = {}, dependencies = {}) {
   const wrapperArgs = wrapperArguments({
     ...seed, command, args, cwd, cleanupTimeoutMs, handshakeTimeoutMs, wrapperScript,
     assemblyCacheDirectory: resolvedAssemblyCacheDirectory,
-    terminateDescendantsOnRootExit
+    terminateDescendantsOnRootExit, folderScope
   });
   const handshakeStartedAt = (dependencies.now || (() => performance.now()))();
   const nativeChild = spawnImpl(powershellPath(childOptions.env || process.env), wrapperArgs, {

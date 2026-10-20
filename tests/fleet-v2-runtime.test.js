@@ -3,7 +3,7 @@ require('./lib/isolated-environment').activate('fleet-v2-runtime');
 const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {createOpenShellAgentHost}=require('../src/lib/openshell-agent-host');
-function fixture(t){
+function fixture(t,{recordAssignment=()=>{}}={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'fleet-v2-runtime-'));
  const document={v:1,counter:0,nodes:[],inbox:[]},calls=[],sessions=[];
  let revision=1,assignment='task one',hold=null,idx=0;
@@ -14,7 +14,7 @@ function fixture(t){
  const env={TOOLSENABLED_RUNTIME_MODE:'host',TOOLSENABLED_HOST_WORKERS:'1',TOOLSENABLED_TOOL_ALLOWLIST:'task.list',TOOLSENABLED_LEVEL_CAP:'2',TOOLSENABLED_FLEET_PROFILE:'fleetV2'};
  const roleHooks={lead:()=>({roleId:'manager',role:{maxLevel:2},surface:{names:['task.list']}}),admitChild:()=>({roleId:'worker',surface:{names:['task.list']}}),brief:({task})=>task,maxLevel:()=>2,removeNativeTools:()=>[]};
  const host=createOpenShellAgentHost({mode:'host',rootSessionId:'owner',workspaceRoot:root,env,launcher,document,roleHooks,folderScope:boundary,
-  getAssignment:()=>({revision,text:assignment}),recordAssignment:()=>{},
+  getAssignment:()=>({revision,text:assignment}),recordAssignment,
   baseAllowlist:['task.list'],leadLevel:2,tiers:{fixture:{provider:'codex',tier:'premium',model:'fixture-model'}},limits:{maxClass:'premium',providers:['codex']},slotBounds:{maxChildren:10,maxDepth:5},nodeFolder:id=>path.join(root,id),watchIntervalMs:0,codexEndpoint:()=>null,continuationLedger:()=>[],continuationEnabled:()=>false});
  t.after(async()=>{hold=null;await host.closeAll();fs.rmSync(root,{recursive:true,force:true})});
  return{host,document,calls,sessions,root,boundary,spawn:parent=>host.spawn({parentSessionId:parent?.sessionId||'owner',tier:'fixture',brief:'initial task'}),edit(text){assignment=text;revision++},setHold(p){hold=p}};
@@ -76,4 +76,25 @@ test('failed quiescence retains custody and blocks resume and removal until stop
  await assert.rejects(f.host.command({parentSessionId:'owner',action:'remove-node',nodeId:a.nodeId}),{code:'MC_TREE_COMMAND_REMOVE_REFUSED'});
  session.quiesce=cleanup;
  const stopped=await f.host.command({parentSessionId:'owner',action:'stop-node',nodeId:a.nodeId});assert.equal(stopped.stopped,true);assert.equal(session.quiescent,true);
+});
+
+test('pause during durable birth prevents every later provider launch',async t=>{
+ let release;const held=new Promise(resolve=>release=resolve);
+ const f=fixture(t,{recordAssignment:()=>held});const starting=f.spawn();
+ const failed=assert.rejects(starting,{code:'FLEET_ACTION_STALE'});
+ await new Promise(resolve=>setImmediate(resolve));const node=f.document.nodes[0];
+ const paused=await f.host.command({parentSessionId:'owner',action:'pause-node',nodeId:node.nodeId});assert.equal(paused.quiescent,true);
+ release();await failed;assert.equal(f.calls.length,0);
+});
+test('failed durable birth leaves no phantom starting slot',async t=>{
+ const f=fixture(t,{recordAssignment:()=>{throw Object.assign(Error('owned failure'),{code:'OWNED_RECORD_FAILED'})}});
+ await assert.rejects(f.spawn(),{code:'OWNED_RECORD_FAILED'});assert.equal(f.calls.length,0);assert.equal(f.document.nodes[0].state,'failed');
+});
+test('retired peer messages are preserved privately while resume fences old work',async t=>{
+ const f=fixture(t),a=await f.spawn(),b=await f.spawn();
+ await f.host.localComms.send({to:a.nodeId,body:'preserved accepted peer evidence'},{agentPrincipal:{sessionId:b.sessionId}});
+ await f.host.command({parentSessionId:'owner',action:'pause-node',nodeId:a.nodeId});
+ const node=f.document.nodes.find(n=>n.nodeId===a.nodeId);assert.equal(node.queue.length,0);
+ assert.equal(node.retiredQueueBatches.flatMap(batch=>batch.items).some(item=>item.text==='preserved accepted peer evidence'),true);
+ assert.equal(f.host.list().find(n=>n.nodeId===a.nodeId).retiredQueuedItems,1);
 });

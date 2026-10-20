@@ -417,6 +417,9 @@ function createOpenShellAgentHost({
   getAssignment = null,
   recordAssignment = null,
   controlRequest = null,
+  getPermissionProfiles = () => null,
+  statusIntroduction = () => '',
+  recordMetrics = () => {},
   folderScope = null,
   continuationLedger = () => require('./owner-request-store').readAll({ kinds: ['T'], includeRemoved: true }),
   continuationEnabled = () => require('./runtime-policy').runtimePolicy().continuationEnabled,
@@ -729,6 +732,7 @@ function createOpenShellAgentHost({
       ...(node.effort ? { effort: node.effort } : {}),
       state: node.state,
       turn: node.turn,
+      ...(fleetV2 ? { retiredQueuedItems: (node.retiredQueueBatches || []).reduce((n, batch) => n + batch.items.length, 0) } : {}),
       ...(node.statusNote ? { statusNote: node.statusNote } : {}),
       ...(node.pending && Object.keys(node.pending).length > 0 ? { pending: { ...node.pending } } : {}),
       lastTurn: node.lastTurn || null,
@@ -1049,11 +1053,17 @@ function createOpenShellAgentHost({
     return /(?:CLOSED|EXITED|stdin is unavailable|STOPPED|TRANSPORT|ACP_PROTOCOL_)/.test(`${error && error.code} ${error && error.message}`);
   }
 
+  function metric(node, type, extra = {}) {
+    if (!fleetV2) return;
+    try { recordMetrics({ type, nodeId: node.nodeId, sessionId: node.sessionId,
+      threadId: node.threadId || null, provider: node.provider, ...extra }); } catch { /* telemetry never grants authority */ }
+  }
+
   function onEvent(node, generation) {
     return event => {
       const state = live.get(node.nodeId);
       if (!state || state.generation !== generation || !event || typeof event !== 'object') return;
-      if (TURN_STATE_EVENTS.has(event.type)) {
+      if (TURN_STATE_EVENTS.has(event.type) || fleetV2 && event.type === 'usage') {
         // A provider may emit events before sendTurn's acceptance promise
         // resolves. None can mutate this turn until its exact identity is
         // known; stale events from ANY older turn are not an acceptance.
@@ -1107,6 +1117,7 @@ function createOpenShellAgentHost({
           at: now(),
         });
       }
+      if (fleetV2 && event.type === 'usage') metric(node, 'usage', { turnId: event.turnId, usage: event.usage });
       if (event.type === 'assistant_text' && typeof event.text === 'string' && event.text !== '') state.pendingText = event.text;
       if (event.type === 'turn_completed') completeTurn(node, generation, event);
     };
@@ -1116,6 +1127,7 @@ function createOpenShellAgentHost({
     const state = live.get(node.nodeId);
     if (!state || state.generation !== generation || node.turn !== 'running') return;
     if (!state.activeTurnId || event.turnId !== state.activeTurnId || event.threadId !== state.session?.threadId) return;
+    metric(node, 'turn_completed', { turnId: event.turnId, status: event.status });
     node.turn = 'idle';
     node.waitingForApproval = false;
     state.activeTurnId = null;
@@ -1299,9 +1311,10 @@ function createOpenShellAgentHost({
         + ` with from "${node.displayName}".`,
     ].join('\n');
     const rules = mode === 'host' ? require('./standing-rules-brief').standingRulesBlock() : '';
+    const status = fleetV2 ? String(statusIntroduction(node) || '').slice(0, 4000) : '';
     return roleHooks.brief({
       roleId: node.role, parentRoleId: parent ? parent.role : rootInfo.roleId,
-      task: `${task}\n\n${treeNote}${rules ? `\n\n${rules}` : ''}`, provider: tiers[node.tier]?.adapter === 'model-api' ? 'local' : node.provider, surface: node.surface || undefined,
+      task: `${task}\n\n${treeNote}${rules ? `\n\n${rules}` : ''}${status ? `\n\n${status}` : ''}`, provider: tiers[node.tier]?.adapter === 'model-api' ? 'local' : node.provider, surface: node.surface || undefined,
     });
   }
 
@@ -1325,6 +1338,8 @@ function createOpenShellAgentHost({
    * `firstTurn` is submitted once it runs; without one it waits idle.
    */
   async function startSession(node, { resume = false, firstTurn = null } = {}) {
+    if (fleetV2 && liveOf(node).pauseRequested)
+      throw refusal('FLEET_ACTION_STALE', 'The worker was paused before its launch could begin.');
     controlDelivery.admitWork(node.nodeId);
     AGENTS.assertWorkerAvailable(KNOWN_AGENTS, node.provider);
     if (!Array.isArray(node.surface?.names) || node.surface.names.length === 0) {
@@ -1408,6 +1423,7 @@ function createOpenShellAgentHost({
       if (observation) launchPolicy.host.commitLaunch(observation.handle, session.threadId);
       node.process = session.processGroup ? { ...session.processGroup } : null;
       node.state = 'running';
+      metric(node, 'started');
       node.turn = 'idle';
       node.updatedAt = now();
       save();
@@ -1497,6 +1513,7 @@ function createOpenShellAgentHost({
       save(); throw failure;
     }
     state.retiringSession = null;
+    if (session) metric(node, 'closed');
     if (!session && node.process) await terminate(node.process, { graceMs: 1000 });
     node.process = null;
     state.activeTurnId = null;
@@ -1543,6 +1560,7 @@ function createOpenShellAgentHost({
       ...(node.interaction ? { interaction: node.interaction } : {}),
       ...(node.effort ? { effort: node.effort } : {}),
       state: node.state,
+      ...(fleetV2 ? { retiredQueuedItems: (node.retiredQueueBatches || []).reduce((n, batch) => n + batch.items.length, 0) } : {}),
       ...extra,
       ...reportsFor(caller),
     });
@@ -1634,10 +1652,16 @@ function createOpenShellAgentHost({
     };
     document.nodes.push(node);
     if (fleetV2 && typeof recordAssignment === 'function') {
-      await recordAssignment(node.nodeId, node.brief);
-      const current = typeof getAssignment === 'function' ? await getAssignment(node.nodeId) : null;
-      if (current?.completed) throw refusal('FLEET_TASK_COMPLETED', 'This durable task is completed; replace it explicitly before resuming.');
-      if (current) { node.brief = current.text; node.assignmentRevision = current.revision; node.taskRevision = current.taskRevision || 1; }
+      try {
+        await recordAssignment(node.nodeId, node.brief);
+        const current = typeof getAssignment === 'function' ? await getAssignment(node.nodeId) : null;
+        if (current?.completed) throw refusal('FLEET_TASK_COMPLETED', 'This durable task is completed; replace it explicitly before resuming.');
+        if (current) { node.brief = current.text; node.assignmentRevision = current.revision; node.taskRevision = current.taskRevision || 1; }
+      } catch (failure) {
+        node.state = 'failed'; node.turn = 'none';
+        node.error = { code: failure.code || 'FLEET_ASSIGNMENT_UNAVAILABLE', message: 'The initial durable assignment could not be prepared; no worker was launched.' };
+        save(); throw failure;
+      }
     }
     save();
     try {
@@ -1688,11 +1712,19 @@ function createOpenShellAgentHost({
     return node;
   }
 
+  function retireQueue(node, reason) {
+    if (fleetV2 && Array.isArray(node.queue) && node.queue.length) {
+      node.retiredQueueBatches ||= [];
+      node.retiredQueueBatches.push({ reason, assignmentRevision: node.assignmentRevision || null, at: now(), items: node.queue });
+    }
+    node.queue = [];
+  }
+
   async function pauseNode(node, caller) {
     continuation.pause(node, 'paused-by-manager');
     const state = liveOf(node);
     state.pauseRequested = true;
-    node.queue = [];
+    retireQueue(node, 'lifecycle-revision');
     const turnWasRunning = await endSession(node, { state: 'paused', note: 'Execution quiesced; resume adopts current task and rules.' });
     return receipt(node, caller, { action: 'pause-node', paused: true, quiescent: true, turnWasRunning });
   }
@@ -1705,7 +1737,7 @@ function createOpenShellAgentHost({
       return receipt(node, caller, { action: 'stop-node', stopped: false, alreadyStopped: true, lastTurn: node.lastTurn || null });
     }
     const dropped = Array.isArray(node.queue) ? node.queue.length : 0;
-    node.queue = [];
+    retireQueue(node, 'lifecycle-revision');
     const turnWasRunning = await endSession(node, { state: 'stopped', note: MANAGER_STOP_NOTE });
     return receipt(node, caller, {
       action: 'stop-node', stopped: true, turnWasRunning, droppedMessages: dropped, lastTurn: node.lastTurn || null,
@@ -1723,20 +1755,21 @@ function createOpenShellAgentHost({
       const current = typeof getAssignment === 'function' ? await getAssignment(node.nodeId) : null;
       if (current?.completed) throw refusal('FLEET_TASK_COMPLETED', 'This durable task is completed; replace it explicitly before resuming.');
       if (current) { node.brief = current.text; node.assignmentRevision = current.revision; node.taskRevision = current.taskRevision || 1; }
-      node.queue = []; liveOf(node).pauseRequested = false;
+      retireQueue(node, 'lifecycle-revision'); liveOf(node).pauseRequested = false;
     }
     await startSession(node, { firstTurn: compositionFor(node, node.brief) });
     return receipt(node, caller, { action: 'fresh-start-existing-node', restarted: true, firstTurnState: 'submitted' });
   }
 
-  function framedAssignment(caller, assignment) {
+  function framedAssignment(caller, assignment, node) {
     // app src/resume-assignment.js, word for word.
     const from = caller.kind === 'root' ? 'from the circle above you:' : `from "${caller.name}":`;
     // A resumed subagent gets the person's current standing rules with its new work.
     const rules = mode === 'host' ? require('./standing-rules-brief').standingRulesBlock() : '';
+    const status = fleetV2 ? String(statusIntroduction(node) || '').slice(0, 4000) : '';
     return `New assignment sent with this resume, ${from}\n\n${assignment}\n\nThis is your next piece of work. Work that is already finished stays finished. `
       + 'Do not stop at reporting that earlier work is complete; do this assignment now. It comes from the circle above you, not from the person, and runs under your current permissions.'
-      + (rules ? `\n\n${rules}` : '');
+      + (rules ? `\n\n${rules}` : '') + (status ? `\n\n${status}` : '');
   }
 
   async function resumeNode(node, caller, assignment) {
@@ -1770,14 +1803,15 @@ function createOpenShellAgentHost({
         node.assignmentRevision = assignment.revision || node.assignmentRevision;
         assignment = assignment.text;
       }
-      node.queue = [];
+      retireQueue(node, 'lifecycle-revision');
       state.pauseRequested = false;
       if (!assignment) assignment = node.brief;
     }
-    const firstTurn = assignment ? framedAssignment(caller, assignment) : null;
+    const firstTurn = assignment ? framedAssignment(caller, assignment, node) : null;
     if (!node.threadId) {
       // A provider or generic model change starts a new conversation.
-      await startSession(node, { firstTurn: firstTurn ? compositionFor(node, `${node.brief}\n\n${firstTurn}`) : null });
+      await startSession(node, { firstTurn: fleetV2 ? compositionFor(node, assignment || node.brief)
+        : firstTurn ? compositionFor(node, `${node.brief}\n\n${firstTurn}`) : null });
     } else {
       await startSession(node, { resume: true, firstTurn });
     }
@@ -2173,7 +2207,7 @@ function createOpenShellAgentHost({
     return Object.freeze({
       accepted: true, to: recipient.name, from: caller.name, relation: recipient.relation,
       delivered: outcome === 'delivered' || outcome === 'inbox',
-      ...(outcome === 'queued' ? { queued: true, note: `${recipient.name} is busy. Delivery waits for an eligible MCP boundary when its adapter supports active-turn messages, or a later turn. This response does not confirm receipt.` } : {}),
+      ...(outcome === 'queued' ? { queued: true, note: fleetV2 ? 'Delivery is queued until the configured message timing boundary; this response does not confirm receipt.' : `${recipient.name} is busy. Delivery waits for an eligible MCP boundary when its adapter supports active-turn messages, or a later turn. This response does not confirm receipt.` } : {}),
       ...(outcome === 'held' ? { recipientStopped: true, wakeRequired: true,
         note: `${recipient.name} is not running, so this waits for it. ${recipient.relation === 'reports-to-sender' ? `Start it again with agent.resume.` : 'The circle above it can start it.'}` } : {}),
       ...(outcome === 'inbox' ? { note: `${recipient.name} reads it on its next agent.* or agent_comms.* answer.` } : {}),
@@ -2194,6 +2228,17 @@ function createOpenShellAgentHost({
     }
     const asNode = { ...request, parentSessionId: node.sessionId };
     const context = { agentPrincipal: { sessionId: node.sessionId } };
+    if (fleetV2) {
+      const actions = { 'pause-node': 'agent.pause', 'stop-node': 'agent.stop', 'resume-node': 'agent.resume',
+        'fresh-start-existing-node': 'agent.restart', 'remove-node': 'agent.remove',
+        'set-node-continuation': 'agent.set_continuation', 'set-node-model': 'agent.set_model',
+        'set-node-speed': 'agent.set_speed', 'set-node-effort': 'agent.set_effort',
+        'set-node-provider': 'agent.set_provider', 'set-node-account': 'agent.set_account', 'set-node-role': 'agent.set_role' };
+      const tool = { spawn: 'agent.spawn', 'spawn-confined': 'agent.spawn', wait: 'agent.wait',
+        'comms.send': 'agent_comms.send_local', 'comms.roster': 'agent_comms.roster', 'fleet-control': 'fleet.control' }[op]
+        || (['command', 'command-confined'].includes(op) ? actions[request.action] : null);
+      if (tool) require('./action-permission-profiles').assertAction({ name: tool }, context.agentPrincipal);
+    }
     if (op === 'fleet-control' && fleetV2 && typeof controlRequest === 'function') return controlRequest(request, node.sessionId);
     if (op === 'spawn') return addWorker(asNode);
     if (op === 'spawn-confined') return spawnConfined(asNode);
@@ -2213,7 +2258,7 @@ function createOpenShellAgentHost({
             || state.session.resolvedSandbox?.type === 'dangerFullAccess');
       });
       return Object.freeze({ nodeId: node.nodeId, sessionId: node.sessionId,
-        ...(fleetV2 ? { folderScope: node.folderScope || folderScope } : {}),
+        ...(fleetV2 ? { folderScope: node.folderScope || folderScope, permissionProfiles: getPermissionProfiles() } : {}),
         unrestricted: mode === 'host' && unrestrictedFileRoot === true && !closing
           && permissionContext.verifiedParent === true && permissionContext.source === 'ancestor-cli'
           && rootLevel === 4 && recordedTier === 'unrestricted'
@@ -2294,7 +2339,7 @@ function createOpenShellAgentHost({
       }
       await Promise.all(affected.map(node => serial(node, () => pauseNode(node, { kind: 'root' }))));
       folderScope = checked;
-      for (const node of affected) { node.folderScope = checked; node.queue = []; }
+      for (const node of affected) { node.folderScope = checked; retireQueue(node, 'parent-folder-revision'); }
       save();
       return Object.freeze({ ok: true, revision: checked.revision, quiescent: true, pausedNodes: affected.map(node => node.nodeId) });
     } finally { folderTransition = false; }
@@ -2334,7 +2379,12 @@ function createOpenShellAgentHost({
     confinedTreeSpawnVersion: 1, confinedTreeLifecycleVersion: 1, spawnConfined, commandConfined,
     isTreeSession,
     command,
-    ...(fleetV2 ? { updateFolderScope } : {}),
+    ...(fleetV2 ? { updateFolderScope, notifyControlAsk({ id, nodeId }) {
+      const asker = byId(nodeId);
+      if (!asker || typeof id !== 'string') throw refusal('FLEET_ASK_INVALID', 'The durable ask has no current worker.');
+      return deliver(null, { id: `ask-${id}`, kind: 'ask', from: asker.displayName, fromNodeId: nodeId,
+        text: `Durable ask ${id} needs an answer; inspect fleet.control read.`, at: now() });
+    } } : {}),
     wait: waitForReports,
     controlDeliveryVersion: 1, controlBoundary, controls,
     resumeAssignmentVersion: 1,

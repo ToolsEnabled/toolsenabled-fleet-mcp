@@ -10,6 +10,7 @@ param(
   # compile $source fresh, every launch. See the caching block at the bottom
   # of this file for what this enables and why it is always safe to omit.
   [Parameter(Mandatory = $false)][string]$AssemblyCacheDirectoryBase64 = '',
+  [Parameter(Mandatory = $false)][string]$FolderScopeBase64 = '',
   # Provider transports use the job root as the lifetime authority. A tool the
   # provider launched must not outlive that root merely because Windows
   # re-parented it before the Node owner could issue a PID-tree kill.
@@ -153,6 +154,13 @@ public static class ToolsEnabledWindowsJobWrapper
         string currentDirectory,
         ref STARTUPINFO startupInfo,
         out PROCESS_INFORMATION processInformation);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CreateProcessAsUserW(IntPtr token, string applicationName,
+        StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles,
+        uint creationFlags, IntPtr environment, string currentDirectory, ref STARTUPINFO startupInfo,
+        out PROCESS_INFORMATION processInformation);
+    private static FleetWindowsFolderScope activeFolderScope;
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
@@ -404,10 +412,15 @@ public static class ToolsEnabledWindowsJobWrapper
             startup.hStdInput = stdin;
             startup.hStdOutput = stdout;
             startup.hStdError = stderr;
+            if (activeFolderScope != null) startup.lpDesktop = activeFolderScope.DesktopName;
 
             PROCESS_INFORMATION process;
-            if (!CreateProcessW(null, CommandLine(command, arguments), IntPtr.Zero, IntPtr.Zero, true,
-                CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, workingDirectory, ref startup, out process))
+            bool created = activeFolderScope == null
+                ? CreateProcessW(null, CommandLine(command, arguments), IntPtr.Zero, IntPtr.Zero, true,
+                    CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, workingDirectory, ref startup, out process)
+                : CreateProcessAsUserW(activeFolderScope.Token, null, CommandLine(command, arguments), IntPtr.Zero, IntPtr.Zero, true,
+                    CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, workingDirectory, ref startup, out process);
+            if (!created)
                 throw new ChildSpawnException(new Win32Exception(Marshal.GetLastWin32Error()));
             state.RootProcess = process.hProcess;
             state.RootThread = process.hThread;
@@ -593,6 +606,17 @@ public static class ToolsEnabledWindowsJobWrapper
         return unchecked((int)code);
     }
 
+    public static int RunWithFolderScope(string pipeName, string token, string command, string[] arguments,
+        string workingDirectory, int cleanupTimeoutMs, int handshakeTimeoutMs,
+        bool terminateDescendantsOnRootExit, string[] reads, string[] writes, bool readAll)
+    {
+        using (var boundary = new FleetWindowsFolderScope(reads, writes, readAll)) {
+            activeFolderScope=boundary;
+            try { return Run(pipeName,token,command,arguments,workingDirectory,cleanupTimeoutMs,handshakeTimeoutMs,terminateDescendantsOnRootExit); }
+            finally { activeFolderScope=null; }
+        }
+    }
+
     public static int Run(string pipeName, string token, string command, string[] arguments,
         string workingDirectory, int cleanupTimeoutMs, int handshakeTimeoutMs,
         bool terminateDescendantsOnRootExit)
@@ -770,6 +794,219 @@ public static class ToolsEnabledWindowsJobWrapper
     private static volatile bool volatileOwnerGone;
     private static volatile bool volatileCancel;
 }
+// Appended to the retained Job wrapper compilation. No WSL, shell expansion,
+// global policy or account creation. The unique restricting SID has no login.
+public sealed class FleetWindowsFolderScope : System.IDisposable
+{
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct SID_AND_ATTRIBUTES { public System.IntPtr Sid; public uint Attributes; }
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError=true)]
+    private static extern bool OpenProcessToken(System.IntPtr process, uint access, out System.IntPtr token);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern System.IntPtr GetCurrentProcess();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(System.IntPtr handle);
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError=true)]
+    private static extern bool CreateRestrictedToken(System.IntPtr existing, uint flags, uint disabledCount,
+        System.IntPtr disabled, uint privilegeCount, System.IntPtr privileges, uint restrictedCount,
+        ref SID_AND_ATTRIBUTES restricted, out System.IntPtr token);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet=System.Runtime.InteropServices.CharSet.Unicode, SetLastError=true)]
+    private static extern System.IntPtr CreateFileW(string path,uint access,uint share,System.IntPtr security,uint creation,uint flags,System.IntPtr template);
+    private readonly System.Collections.Generic.Dictionary<string,System.IntPtr> locks = new System.Collections.Generic.Dictionary<string,System.IntPtr>(System.StringComparer.OrdinalIgnoreCase);
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct SECURITY_ATTRIBUTES { public int Length; public System.IntPtr Descriptor; public int Inherit; }
+    [System.Runtime.InteropServices.DllImport("advapi32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode,SetLastError=true)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string text,uint revision,out System.IntPtr descriptor,out uint size);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern System.IntPtr LocalFree(System.IntPtr pointer);
+    [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode,SetLastError=true)]
+    private static extern System.IntPtr CreateWindowStationW(string name,uint flags,uint access,ref SECURITY_ATTRIBUTES attributes);
+    [System.Runtime.InteropServices.DllImport("user32.dll",SetLastError=true)] private static extern bool SetProcessWindowStation(System.IntPtr station);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern System.IntPtr GetProcessWindowStation();
+    [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode,SetLastError=true)]
+    private static extern System.IntPtr CreateDesktopW(string name,string device,System.IntPtr mode,uint flags,uint access,ref SECURITY_ATTRIBUTES attributes);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool CloseDesktop(System.IntPtr desktop);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool CloseWindowStation(System.IntPtr station);
+    private System.IntPtr stationHandle, desktopHandle;
+    public string DesktopName { get; private set; }
+    private void PreparePrivateDesktop()
+    {
+        string name="fleetV2-"+System.Guid.NewGuid().ToString("N");
+        string user=System.Security.Principal.WindowsIdentity.GetCurrent().User.Value;
+        string sddl="D:(A;;GA;;;SY)(A;;GA;;;"+user+")(A;;GA;;;"+sid.Value+")";
+        System.IntPtr descriptor; uint size;
+        if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl,1,out descriptor,out size))
+            throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+        var attributes=new SECURITY_ATTRIBUTES();attributes.Length=System.Runtime.InteropServices.Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));attributes.Descriptor=descriptor;
+        var original=GetProcessWindowStation();
+        try {
+            stationHandle=CreateWindowStationW(name,0,0x000f037f,ref attributes);
+            if(stationHandle==System.IntPtr.Zero || !SetProcessWindowStation(stationHandle))
+                throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            desktopHandle=CreateDesktopW("default",null,System.IntPtr.Zero,0,0x10000000,ref attributes);
+            if(desktopHandle==System.IntPtr.Zero)throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            DesktopName=name+"\\default";
+        } finally { SetProcessWindowStation(original);LocalFree(descriptor); }
+    }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct TOKEN_DEFAULT_DACL { public System.IntPtr Dacl; }
+    [System.Runtime.InteropServices.DllImport("advapi32.dll",SetLastError=true)]
+    private static extern bool GetTokenInformation(System.IntPtr token,int kind,System.IntPtr buffer,int length,out int needed);
+    [System.Runtime.InteropServices.DllImport("advapi32.dll",SetLastError=true)]
+    private static extern bool SetTokenInformation(System.IntPtr token,int kind,ref TOKEN_DEFAULT_DACL info,int length);
+    private void PrepareDefaultDacl()
+    {
+        int needed;GetTokenInformation(Token,6,System.IntPtr.Zero,0,out needed);
+        var data=System.Runtime.InteropServices.Marshal.AllocHGlobal(needed);
+        System.IntPtr memory=System.IntPtr.Zero;
+        try {
+            if(!GetTokenInformation(Token,6,data,needed,out needed))throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            var pointer=System.Runtime.InteropServices.Marshal.ReadIntPtr(data);
+            System.Security.AccessControl.RawAcl acl;
+            if(pointer==System.IntPtr.Zero) acl=new System.Security.AccessControl.RawAcl(2,1);
+            else {
+                int size=(ushort)System.Runtime.InteropServices.Marshal.ReadInt16(pointer,2);
+                byte[] bytes=new byte[size];System.Runtime.InteropServices.Marshal.Copy(pointer,bytes,0,size);
+                acl=new System.Security.AccessControl.RawAcl(bytes,0);
+            }
+            acl.InsertAce(acl.Count,new System.Security.AccessControl.CommonAce(System.Security.AccessControl.AceFlags.None,
+                System.Security.AccessControl.AceQualifier.AccessAllowed,0x10000000,sid,false,null));
+            byte[] encoded=new byte[acl.BinaryLength];acl.GetBinaryForm(encoded,0);
+            memory=System.Runtime.InteropServices.Marshal.AllocHGlobal(encoded.Length);
+            System.Runtime.InteropServices.Marshal.Copy(encoded,0,memory,encoded.Length);
+            var info=new TOKEN_DEFAULT_DACL();info.Dacl=memory;
+            if(!SetTokenInformation(Token,6,ref info,System.IntPtr.Size))throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+        } finally {
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(data);
+            if(memory!=System.IntPtr.Zero)System.Runtime.InteropServices.Marshal.FreeHGlobal(memory);
+        }
+    }
+    private readonly System.Security.Principal.SecurityIdentifier sid;
+    private readonly System.Collections.Generic.List<string> grants = new System.Collections.Generic.List<string>();
+    public System.IntPtr Token { get; private set; }
+    public FleetWindowsFolderScope(string[] reads, string[] writes, bool readAll)
+    {
+        byte[] random = new byte[16];
+        using (var rng = System.Security.Cryptography.RandomNumberGenerator.Create()) rng.GetBytes(random);
+        sid = new System.Security.Principal.SecurityIdentifier("S-1-5-21-" +
+            (System.BitConverter.ToUInt32(random,0) & 0x7fffffff) + "-" +
+            (System.BitConverter.ToUInt32(random,4) & 0x7fffffff) + "-" +
+            (System.BitConverter.ToUInt32(random,8) & 0x7fffffff) + "-" +
+            (System.BitConverter.ToUInt32(random,12) & 0x7fffffff));
+        System.IntPtr original=System.IntPtr.Zero, sidBytes=System.IntPtr.Zero;
+        try {
+            foreach (string root in reads) if (!readAll) Grant(root, System.Security.AccessControl.FileSystemRights.ReadAndExecute);
+            foreach (string root in writes) Grant(root,
+                System.Security.AccessControl.FileSystemRights.Write |
+                System.Security.AccessControl.FileSystemRights.Delete |
+                System.Security.AccessControl.FileSystemRights.DeleteSubdirectoriesAndFiles |
+                System.Security.AccessControl.FileSystemRights.ReadPermissions |
+                System.Security.AccessControl.FileSystemRights.Synchronize);
+            if (!OpenProcessToken(GetCurrentProcess(), 0x008b, out original))
+                throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            byte[] bytes = new byte[sid.BinaryLength]; sid.GetBinaryForm(bytes,0);
+            sidBytes=System.Runtime.InteropServices.Marshal.AllocHGlobal(bytes.Length);
+            System.Runtime.InteropServices.Marshal.Copy(bytes,0,sidBytes,bytes.Length);
+            SID_AND_ATTRIBUTES item=new SID_AND_ATTRIBUTES(); item.Sid=sidBytes;
+            System.IntPtr token;
+            // WRITE_RESTRICTED limits the restricting-SID check to writes.
+            // This is allowed only by the explicit parent readAll flag.
+            if (!CreateRestrictedToken(original, readAll ? 9u : 1u, 0, System.IntPtr.Zero,
+                    0, System.IntPtr.Zero, 1, ref item, out token))
+                throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            Token=token;
+            PrepareDefaultDacl();
+            PreparePrivateDesktop();
+        } catch { Dispose(); throw; }
+        finally {
+            if (original!=System.IntPtr.Zero) CloseHandle(original);
+            if (sidBytes!=System.IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(sidBytes);
+        }
+    }
+    private void ValidatePhysical(string root)
+    {
+        if (string.IsNullOrEmpty(root) || !System.IO.Path.IsPathRooted(root)
+                || !string.Equals(System.IO.Path.GetFullPath(root).TrimEnd('\\'),root.TrimEnd('\\'),System.StringComparison.OrdinalIgnoreCase))
+            throw new System.ArgumentException("Native folder scope requires physical absolute paths.");
+        var parts=new System.Collections.Generic.Stack<string>();
+        string current=root;
+        for (;;) {
+            parts.Push(current);
+            var parent=System.IO.Directory.GetParent(current);
+            if (parent==null || string.Equals(parent.FullName,current,System.StringComparison.OrdinalIgnoreCase)) break;
+            current=parent.FullName;
+        }
+        while(parts.Count>0) {
+            current=parts.Pop();
+            if(!locks.ContainsKey(current)) {
+                // Retain each ancestor without FILE_SHARE_DELETE. Root/ancestor
+                // replacement cannot redirect path-based DACL updates.
+                var handle=CreateFileW(current,0,3,System.IntPtr.Zero,3,0x02200000,System.IntPtr.Zero);
+                if(handle==new System.IntPtr(-1)) throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                locks.Add(current,handle);
+            }
+            if ((System.IO.File.GetAttributes(current) & System.IO.FileAttributes.ReparsePoint)!=0)
+                throw new System.IO.IOException("Native folder scope refuses reparse-point roots.");
+        }
+    }
+    private void Grant(string root, System.Security.AccessControl.FileSystemRights rights)
+    {
+        ValidatePhysical(root);
+        bool directory=System.IO.Directory.Exists(root);
+        var inheritance=directory ? System.Security.AccessControl.InheritanceFlags.ContainerInherit |
+            System.Security.AccessControl.InheritanceFlags.ObjectInherit : System.Security.AccessControl.InheritanceFlags.None;
+        System.Security.AccessControl.FileSystemSecurity acl=directory
+            ? (System.Security.AccessControl.FileSystemSecurity)System.IO.Directory.GetAccessControl(root)
+            : System.IO.File.GetAccessControl(root);
+        var rule=new System.Security.AccessControl.FileSystemAccessRule(sid,rights,inheritance,
+            System.Security.AccessControl.PropagationFlags.None,System.Security.AccessControl.AccessControlType.Allow);
+        acl.AddAccessRule(rule);
+        // Add before mutation so even an ambiguous SetAccessControl failure
+        // preserves cleanup custody. Never restore a stale whole DACL.
+        grants.Add(root);
+        if (directory) System.IO.Directory.SetAccessControl(root,(System.Security.AccessControl.DirectorySecurity)acl);
+        else System.IO.File.SetAccessControl(root,(System.Security.AccessControl.FileSecurity)acl);
+        // Protected descendants do not inherit; refuse instead of silently
+        // giving a worker less effective scope than its parent.
+        if (directory) {
+            var pending=new System.Collections.Generic.Stack<string>(); pending.Push(root);
+            while(pending.Count>0) foreach(string entry in System.IO.Directory.GetFileSystemEntries(pending.Pop())) {
+                var attrs=System.IO.File.GetAttributes(entry);
+                if ((attrs & System.IO.FileAttributes.ReparsePoint)!=0) continue; // target gets no new grant
+                bool subdir=(attrs & System.IO.FileAttributes.Directory)!=0;
+                var childAcl=subdir ? (System.Security.AccessControl.FileSystemSecurity)System.IO.Directory.GetAccessControl(entry)
+                    : System.IO.File.GetAccessControl(entry);
+                if (childAcl.AreAccessRulesProtected)
+                    throw new System.UnauthorizedAccessException("A protected descendant DACL cannot inherit the exact folder grant.");
+                if(subdir) pending.Push(entry);
+            }
+        }
+    }
+    public void Dispose()
+    {
+        if(Token!=System.IntPtr.Zero) { CloseHandle(Token); Token=System.IntPtr.Zero; }
+        if(desktopHandle!=System.IntPtr.Zero) { CloseDesktop(desktopHandle); desktopHandle=System.IntPtr.Zero; }
+        if(stationHandle!=System.IntPtr.Zero) { CloseWindowStation(stationHandle); stationHandle=System.IntPtr.Zero; }
+        System.Exception failed=null;
+        for(int i=grants.Count-1;i>=0;i--) {
+            string root=grants[i];
+            try {
+                bool directory=System.IO.Directory.Exists(root);
+                var acl=directory ? (System.Security.AccessControl.FileSystemSecurity)System.IO.Directory.GetAccessControl(root)
+                    : System.IO.File.GetAccessControl(root);
+                var rules=acl.GetAccessRules(true,false,typeof(System.Security.Principal.SecurityIdentifier));
+                foreach(System.Security.AccessControl.FileSystemAccessRule rule in rules)
+                    if(rule.IdentityReference.Equals(sid)) acl.RemoveAccessRuleSpecific(rule);
+                if(directory) System.IO.Directory.SetAccessControl(root,(System.Security.AccessControl.DirectorySecurity)acl);
+                else System.IO.File.SetAccessControl(root,(System.Security.AccessControl.FileSecurity)acl);
+            } catch(System.Exception error) { failed=error; }
+        }
+        grants.Clear();
+        foreach(var handle in locks.Values) CloseHandle(handle);
+        locks.Clear();
+        if(failed!=null) throw new System.IO.IOException("Scoped folder ACE cleanup could not be confirmed.",failed);
+    }
+}
+
 '@
 
 # CACHING. See the -AssemblyCacheDirectoryBase64 parameter comment above.
@@ -881,6 +1118,14 @@ try {
   $argumentJson = $utf8.GetString([Convert]::FromBase64String($ArgumentsBase64))
   $parsed = ConvertFrom-Json -InputObject $argumentJson
   [string[]]$childArguments = @($parsed | ForEach-Object { [string]$_ })
+  if ($FolderScopeBase64) {
+    $scope = ConvertFrom-Json -InputObject $utf8.GetString([Convert]::FromBase64String($FolderScopeBase64))
+    [string[]]$reads = @($scope.readRoots | ForEach-Object { [string]$_ })
+    [string[]]$writes = @($scope.writeRoots | ForEach-Object { [string]$_ })
+    $result = [ToolsEnabledWindowsJobWrapper]::RunWithFolderScope($PipeName,$Token,$command,$childArguments,
+      $workingDirectory,$CleanupTimeoutMs,$HandshakeTimeoutMs,[bool]$TerminateDescendantsOnRootExit,
+      $reads,$writes,($scope.readAll -eq $true))
+  } else {
   $result = [ToolsEnabledWindowsJobWrapper]::Run(
     $PipeName,
     $Token,
@@ -891,6 +1136,7 @@ try {
     $HandshakeTimeoutMs,
     [bool]$TerminateDescendantsOnRootExit
   )
+  }
   exit $result
 } catch {
   # Add-Type/argument decoding can fail before the trusted wrapper owns a pipe.

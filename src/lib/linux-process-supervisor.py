@@ -141,8 +141,12 @@ def probe():
 def restrict_folders(scope):
     if scope is None:
         return
-    if not isinstance(scope, dict) or set(scope) != {"readRoots", "writeRoots", "revision", "source"}:
+    if not isinstance(scope, dict) or set(scope) - {"readAll"} != {"readRoots", "writeRoots", "revision", "source"}:
         raise ValueError("invalid folder scope")
+    if scope.get("readAll") not in (None, True, False):
+        raise ValueError("invalid readAll")
+    if scope.get("readAll") is True:
+        scope = dict(scope, readRoots=["/"])
     for key in ("readRoots", "writeRoots"):
         if not isinstance(scope[key], list) or any(not isinstance(p, str) or not os.path.isabs(p)
                 or os.path.realpath(p) != p for p in scope[key]):

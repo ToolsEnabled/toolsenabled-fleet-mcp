@@ -18,7 +18,9 @@ function normalize(scope) {
     if (physical !== path.resolve(value)) throw fail('FLEET_FOLDER_SCOPE_INVALID', 'Folder boundaries cannot contain aliases.');
     return physical;
   }))].sort());
+  if (scope.readAll !== undefined && typeof scope.readAll !== 'boolean') throw fail('FLEET_FOLDER_SCOPE_INVALID', 'readAll must be an explicit boolean.');
   return Object.freeze({ readRoots: roots(scope.readRoots), writeRoots: roots(scope.writeRoots),
+    ...(scope.readAll === true ? { readAll: true } : {}),
     revision: scope.revision, source: scope.source });
 }
 function run(scope, operation) { return context.run(normalize(scope), operation); }

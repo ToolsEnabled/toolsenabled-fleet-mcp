@@ -248,6 +248,8 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
     throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'A private launch observer factory is required.');
   async function startNative(spec, { launchObservation = null } = {}) {
     requireEnabled(config, env);
+    if (spec.fleetV2 && process.platform === 'win32')
+      throw refusal('FLEET_WINDOWS_PROVIDER_IPC_UNQUALIFIED', 'The native folder boundary is implemented, but provider IPC under it has not passed qualification; no bypass worker was started.');
     if (launchObservation !== null && typeof launchObservation !== 'function')
       throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'A private launch observation function is required.');
     const agents = require('./agents/registry');
