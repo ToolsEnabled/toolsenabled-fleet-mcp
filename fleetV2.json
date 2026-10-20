@@ -1,0 +1,6 @@
+{
+  "name": "fleetV2",
+  "version": "2.0.0-alpha.1",
+  "distribution": "standalone-mcp",
+  "entry": "bin/fleetV2.js"
+}

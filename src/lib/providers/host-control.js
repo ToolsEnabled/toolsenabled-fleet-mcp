@@ -583,6 +583,7 @@ function failIfAccessDenied(error) {
 // bypassed every pattern below, even though both spellings open the identical
 // file. See src/lib/canonical-path.js.
 function checkContainmentAndExclusions(candidatePath, { forWrite }) {
+  require('../host-file-access').assertPath(candidatePath, { forWrite });
   const relativeToHome = path.relative(HOME, candidatePath);
   if ((relativeToHome.startsWith('..') || path.isAbsolute(relativeToHome))
       && process.env.TOOLSENABLED_RUNTIME_MODE !== 'host') {

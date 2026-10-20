@@ -27,6 +27,21 @@ function createInherited({ fileToolContext, resolve, env = process.env } = {}) {
   return authorization;
 }
 
+// Only the transport composition root supplies this resolver. It reads the
+// operator policy or the authenticated parent link, never request arguments.
+function createScoped({ fileToolContext, resolveFolderScope, env = process.env } = {}) {
+  if (env.TOOLSENABLED_RUNTIME_MODE !== 'host' || env.TOOLSENABLED_HOST_SETUP_KIND === 'plugin'
+      || env.TOOLSENABLED_FLEET_PROFILE !== 'fleetV2' || typeof resolveFolderScope !== 'function') return undefined;
+  require('./file-tool-context').requireFileToolContext(fileToolContext);
+  const authorization = Object.freeze({});
+  authorizations.set(authorization, { fileToolContext, resolveFolderScope });
+  return authorization;
+}
+
+function scopeKey(value) {
+  return JSON.stringify([value.revision, value.source, value.readAll === true, value.readRoots, value.writeRoots]);
+}
+
 function bound(context) {
   const authorization = authorizations.get(context?.hostFileAuthorization);
   return authorization?.fileToolContext === context?.fileToolContext ? authorization : null;
@@ -34,6 +49,13 @@ function bound(context) {
 
 async function prepare(context) {
   const authorization = bound(context);
+  if (authorization?.resolveFolderScope && context?.setupKind !== 'plugin' && !context?.researchAccess) {
+    const folderScope = require('./fleet-folder-scope').normalize(await authorization.resolveFolderScope());
+    const records = require('./setup/machine-record');
+    const record = records.readMachineRecord({ servicesRoot: records.resolveServicesRoot({}), adopt: false });
+    return { ...context, hostFolderScope: folderScope,
+      permissionSession: require('./permission-tier-policy').effectiveSessionFromRecord(4, record) };
+  }
   if (!authorization?.resolve || context?.setupKind === 'plugin' || context?.researchAccess) return context;
   require('./file-tool-context').requireFileToolContext(authorization.fileToolContext);
   authorization.admitted = await authorization.resolve() === true;
@@ -48,10 +70,12 @@ async function prepare(context) {
 function run(context, callback) {
   const session = require('./permission-tier-policy').session(context?.permissionSession);
   const authorization = bound(context);
-  return scope.run(authorization
+  const active = authorization?.resolveFolderScope && context.hostFolderScope
+    ? { ...authorization, admittedScope: context.hostFolderScope, revoked: false } : authorization;
+  return scope.run(active
     && session.origin === 'local' && session.tier === 'full'
     && require('./providers/host-control').hostByteMediationEnabled()
-    && !context?.researchAccess && context?.setupKind !== 'plugin' ? authorization : null, callback);
+    && !context?.researchAccess && context?.setupKind !== 'plugin' ? active : null, callback);
 }
 
 function unrestricted() {
@@ -71,6 +95,10 @@ function assertCurrent() {
   const authorization = scope.getStore();
   if (!authorization) return;
   require('./file-tool-context').requireFileToolContext(authorization.fileToolContext);
+  if (authorization.resolveFolderScope && (!authorization.admittedScope || authorization.revoked)) {
+    throw Object.assign(new Error('The parent folder policy changed during this operation. Read again under its current revision.'),
+      { code: 'FLEET_FOLDER_SCOPE_CHANGED' });
+  }
   if (authorization.resolve && !authorization.admitted) {
     throw Object.assign(new Error('The worker no longer inherits unrestricted file access.'), { code: 'HOST_FILE_ACCESS_REVOKED' });
   }
@@ -80,8 +108,28 @@ async function refresh() {
   const authorization = scope.getStore();
   if (!authorization) return;
   require('./file-tool-context').requireFileToolContext(authorization.fileToolContext);
+  if (authorization.resolveFolderScope) {
+    try {
+      const current = require('./fleet-folder-scope').normalize(await authorization.resolveFolderScope());
+      if (scopeKey(current) !== scopeKey(authorization.admittedScope)) authorization.revoked = true;
+    } catch (error) { authorization.revoked = true; throw error; }
+  }
   if (authorization.resolve) authorization.admitted = await authorization.resolve() === true;
   assertCurrent();
+}
+
+function assertPath(candidate, { forWrite = false } = {}) {
+  const authorization = scope.getStore();
+  if (!authorization?.resolveFolderScope) return;
+  assertCurrent();
+  if (!forWrite && authorization.admittedScope.readAll === true) return;
+  const paths = require('node:path');
+  const roots = forWrite ? authorization.admittedScope.writeRoots : authorization.admittedScope.readRoots;
+  if (!roots.some(root => {
+    const relative = paths.relative(root, candidate);
+    return relative === '' || relative !== '..' && !relative.startsWith(`..${paths.sep}`) && !paths.isAbsolute(relative);
+  })) throw Object.assign(new Error(`The path is outside the current parent ${forWrite ? 'write' : 'read'} folder scope.`),
+    { code: 'FLEET_FOLDER_SCOPE_DENIED' });
 }
 
 // Resource syntax is separate from access authorization. Host adapters check
@@ -105,4 +153,4 @@ function resourcePath(value, { platform = process.platform } = {}) {
   return normalized;
 }
 
-module.exports = { create, createInherited, prepare, run, unrestricted, assertCurrent, refresh, resourcePath };
+module.exports = { create, createInherited, createScoped, prepare, run, unrestricted, assertCurrent, refresh, assertPath, resourcePath };
