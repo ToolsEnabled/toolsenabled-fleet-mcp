@@ -1,14 +1,13 @@
-# Independent Fleet MCP for Codex
+# ToolsEnabled Fleet for Codex
 
 This maintenance candidate uses the published Fleet 1.9.1 source snapshot plus
 the reviewed fixes listed in docs/MAINTENANCE-20261019.md. It keeps the Codex
-package separate from the Claude plugin runtime. Fleet does not
-limit a worker's rounds, tokens or time. Install it from this repository's
-`openai-plugin` branch:
+package separate from the Claude plugin runtime. The plugin offers coordination with workers off. After this candidate is merged
+into `openai-plugin`, install it from that branch:
 
 ```sh
 codex plugin marketplace add ToolsEnabled/toolsenabled-fleet-mcp --ref openai-plugin
-codex plugin add toolsenabled-fleet-mcp@toolsenabled-fleet-mcp-openai
+codex plugin add toolsenabled-fleet@toolsenabled-fleet-openai
 ```
 
 Requires Linux x86_64 and Node >=22.19. Configure this separate state yourself
@@ -29,12 +28,18 @@ State retains tasks, ledger, memory/search and host records in the separate
 private root. Stop clients before private backup/deletion; uninstall retains
 state. Codex may send tool results to OpenAI under its own login/terms. The core
 is not an OS sandbox for Codex's own tools. No API keys are forwarded by this
-manifest. See SECURITY.md, docs/HOST-MODE.md and the MIT license. Public policy
-links are https://toolsenabled.ai/privacy/ and https://toolsenabled.ai/terms/;
-coverage for this exact archive/Codex path still needs lead review. Source website
-is https://toolsenabled.ai; no dedicated product page is asserted.
+manifest. See SECURITY.md, docs/HOST-MODE.md and the MIT license. See the package-specific [privacy statement](PRIVACY.md) and
+[vendor policy record](docs/PLUGIN-POLICY.md). No directory approval is claimed.
 
 The prior package was qualified by a fresh install with Codex CLI 0.162.1 on
 Linux x86_64. This candidate has automated entry and source regression checks;
 a fresh installation of this exact version remains a release check. Native Windows/macOS, worker lifecycle and OpenAI directory approval
 are not claimed; the plugin has not been submitted to the directory.
+
+The package name is now `toolsenabled-fleet@toolsenabled-fleet-openai`. If you installed the older `toolsenabled-fleet-mcp@toolsenabled-fleet-mcp-openai` entry, remove that plugin before adding this one to avoid duplicate servers. Keep your selected state folder and project variables; plugin removal does not delete them.
+
+Example prompts:
+
+- "List Fleet tasks for this project and show the unfinished ones."
+- "Save the build command I just gave you in this project's Fleet memory."
+- "Use Fleet to read notes.txt, change its title to Release notes, and show the result."

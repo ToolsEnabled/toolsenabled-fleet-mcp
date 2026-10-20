@@ -355,7 +355,7 @@ function setupPluginHost({ stateRoot, workspace, tier = 'unrestricted', workers 
     pluginRebound: Boolean(previousConfig && previousConfig.installRoot !== INSTALL_ROOT) });
 }
 
-async function serveHost(config, { actor, treeKey = null, enableRoleControl = false } = {}) {
+async function serveHost(config, { actor, treeKey = null, enableRoleControl = false, allowedToolNames } = {}) {
   requireHostEnvironment();
   if (treeKey && !config.workers) refuse('HOST_WORKERS_DISABLED', 'An existing tree selection requires the saved host worker opt-in.');
   if (config.workers) require('./host-worker-prerequisite').requireHostWorkerNative();
@@ -375,6 +375,7 @@ async function serveHost(config, { actor, treeKey = null, enableRoleControl = fa
   process.stderr.write(`[toolsenabled] ${HOST_WARNING}\n`);
   if (!actor) process.stderr.write('[toolsenabled] HOST_ACTOR_UNBOUND: no --actor was supplied; ledger mutations require an explicit provider actor at startup.\n');
   const options = { agentActor: actor || null, toolSummary: require('./host-descriptions'),
+    ...(allowedToolNames === undefined ? {} : { allowedToolNames: Object.freeze([...allowedToolNames]) }),
     setupKind: config.setupKind,
     permissionSession: require('./permission-tier-policy').effectiveSessionFromRecord(
       require('./agents/permission-level').leadLevel({ registry: require('./agents/registry').activeRegistry() }).level, record),

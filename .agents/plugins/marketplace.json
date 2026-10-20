@@ -1,11 +1,11 @@
 {
-  "name": "toolsenabled-fleet-mcp-openai",
+  "name": "toolsenabled-fleet-openai",
   "interface": {
-    "displayName": "Independent Fleet MCP for Codex"
+    "displayName": "ToolsEnabled Fleet for Codex"
   },
   "plugins": [
     {
-      "name": "toolsenabled-fleet-mcp",
+      "name": "toolsenabled-fleet",
       "source": {
         "source": "local",
         "path": "./"

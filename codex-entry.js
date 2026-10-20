@@ -3,6 +3,7 @@
 const path = require('node:path');
 const { realpathSync } = require('node:fs');
 const runtime = require('./src/lib/host-runtime');
+const allowedToolNames = Object.freeze([...require('./.codex-plugin/policy.json').allowedTools]);
 
 function coreConfig(env, readConfig = runtime.readHostConfig, real = realpathSync) {
   const state = env.FLEET_MCP_CODEX_STATE_ROOT, workspace = env.FLEET_MCP_CODEX_WORKSPACE;
@@ -20,7 +21,7 @@ async function main({ env = process.env, readConfig, real, serve = runtime.serve
   const config = coreConfig(env, readConfig, real);
   // Keep relative arguments inside the same canonical selected project.
   enterWorkspace(config.workspace);
-  return serve(config, { actor: 'codex' });
+  return serve(config, { actor: 'codex', allowedToolNames });
 }
 if (require.main === module) main().catch(error => { process.stderr.write(error.message + '\n'); process.exitCode = 1; });
 module.exports = { coreConfig, main };
