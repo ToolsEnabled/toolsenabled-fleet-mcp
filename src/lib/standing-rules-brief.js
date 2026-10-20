@@ -26,7 +26,8 @@ function standingRulesBlock({ collect = selector => require('./owner-request-sto
   }
   const more = lines.length - shown.length;
   return ['STANDING RULES FROM THE PERSON (follow these; they outrank the task above)', ...shown,
-    ...(more > 0 ? [`(${more} more; read them with ledger.read)`] : [])].join('\n');
+    // Rules are delivered here, never fetched: the rest are the person's to see, not instructions to look up.
+    ...(more > 0 ? [`(${more} more not shown; the person sees every rule with toolsenabled ledger)`] : [])].join('\n');
 }
 
 module.exports = { standingRulesBlock };

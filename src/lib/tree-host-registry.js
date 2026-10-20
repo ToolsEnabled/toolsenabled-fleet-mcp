@@ -34,6 +34,15 @@ function supportsConfinedTreeLifecycle() {
 }
 // An application that carries agent.resume's next assignment to the
 // resumed session says so. Without it an assignment is refused, never dropped.
+function supportsConfinedSpeedControl() {
+  return host?.confinedSpeedControlVersion === 1 && typeof host.commandSpeedConfined === 'function';
+}
+function supportsConfinedConfigurationControl() {
+  return host?.confinedConfigurationControlVersion === 1 && typeof host.commandConfigurationConfined === 'function';
+}
+function supportsConfinedContinuationControl() {
+  return host?.confinedContinuationControlVersion === 1 && typeof host.commandContinuationConfined === 'function';
+}
 function supportsResumeAssignment() {
   return host?.resumeAssignmentVersion === 1;
 }
@@ -46,4 +55,7 @@ module.exports = Object.freeze({
   supportsConfinedTreeSpawn,
   supportsConfinedTreeLifecycle,
   supportsResumeAssignment,
+  supportsConfinedSpeedControl,
+  supportsConfinedConfigurationControl,
+  supportsConfinedContinuationControl,
 });

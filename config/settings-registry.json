@@ -361,7 +361,7 @@
       "depth": 1,
       "control": "toggle",
       "default": true,
-      "consequence": "Keep assistants working through applicable open and in-progress ledger tasks. Saved conversations recover after Fleet restarts, through the same account, role and permission gates. Transient failures retry with bounded backoff; interrupted turns are checked against their saved conversation before another turn. Stop, permission and account failures remain paused. Unchanged tasks pause after three follow-ups until their checkpoint changes; other eligible tasks can continue.",
+      "consequence": "Allow explicitly enrolled standalone workers to continue assigned owner T-ledger tasks through agent.continue. Enrollment supplies exact task IDs and a turn budget; this switch alone launches no work. Blocked tasks and dependencies wait; three unchanged attempts hold a task. Stops, failures and provider interactions pause continuation. Restart retains receipts but requires explicit reconciliation and re-enrollment; automatic restart recovery is not available.",
       "capabilities": [
         "Continue authorized task and workflow progress without another message after each successful turn."
       ],
@@ -369,7 +369,7 @@
         "Automatic follow-up turns can consume account quota while unfinished work remains."
       ],
       "derivedFrom": "built-in product policy",
-      "enforcedBy": "src/lib/ledger-continuation-controller.js schedules application-host turns through existing send, cancellation and account gates",
+      "enforcedBy": "src/lib/ledger-continuation-controller.js and src/lib/openshell-agent-host.js schedule explicitly enrolled standalone worker turns through existing sessions; no provider permission or account settings are changed",
       "applies": "next-call"
     },
     {

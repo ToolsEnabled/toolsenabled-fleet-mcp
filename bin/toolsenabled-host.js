@@ -32,16 +32,18 @@ function parseArgs(argv) {
   const result = { args: [], stateRoot: path.join(os.homedir(), '.toolsenabled-host') };
   for (let at = 0; at < argv.length; at += 1) {
     const arg = argv[at];
-    if (['--state-root', '--actor', '--workspace', '--tier', '--providers', '--models'].includes(arg)) {
+    if (['--state-root', '--actor', '--workspace', '--tier', '--providers', '--models', '--tree-key'].includes(arg)) {
       if (!argv[at + 1] || argv[at + 1].startsWith('--')) throw new Error(`${arg} needs a value.`);
-      result[({ '--state-root': 'stateRoot', '--actor': 'actor', '--workspace': 'workspace', '--tier': 'tier', '--providers': 'providers', '--models': 'models' })[arg]] = argv[++at];
+      if (arg === '--tree-key' && result.treeKey !== undefined) throw new Error('Supply only one --tree-key.');
+      result[({ '--state-root': 'stateRoot', '--actor': 'actor', '--workspace': 'workspace', '--tier': 'tier', '--providers': 'providers', '--models': 'models', '--tree-key': 'treeKey' })[arg]] = argv[++at];
     } else if (['--offset', '--limit', '--revision', '--namespace', '--query', '--width', '--surface'].includes(arg)) {
       if (!argv[at + 1] || !['--query', '--namespace'].includes(arg) && argv[at + 1].startsWith('--')) throw new Error(`${arg} needs a value.`);
       result[arg.slice(2)] = argv[++at];
     } else if (arg === '--pass-env') {
       if (argv[at + 1] === undefined) throw new Error('--pass-env needs a value.');
       result.passEnv = require('../src/lib/agents/registration').passEnvNames(argv[++at]);
-    } else if (arg === '--plugin') result.plugin = true;
+    } else if (arg === '--enable-role-control') result.enableRoleControl = true;
+    else if (arg === '--plugin') result.plugin = true;
     else if (arg === '--enable-workers') result.enableWorkers = true;
     else if (arg === '--add') result.add = true;
     else if (arg === '--print-server-json') result.printServerJson = true;
@@ -58,6 +60,8 @@ function parseArgs(argv) {
   if (result.actor && result.actor !== 'local' && !hostRegistry(result.stateRoot).has(result.actor)) {
     throw new Error('The actor must be a described agent or local for a direct model worker.');
   }
+  if (result.enableRoleControl && (result.args.length !== 1 || result.args[0] !== 'serve')) throw new Error('--enable-role-control applies only to serve.');
+  if (result.treeKey !== undefined && (result.args.length !== 1 || result.args[0] !== 'serve')) throw new Error('--tree-key applies only to serve.');
   const paged = ['offset', 'limit', 'revision'].some(key => result[key] !== undefined);
   if ((paged && (!['ledger', 'tasks', 'memory', 'audit', 'settings', 'status'].includes(result.args[0]) || !(result.json || result.text)))
       || (result.args[0] === 'ledger' && (result.json || result.text) && result.args[1])) {
@@ -138,7 +142,9 @@ async function main(argv) {
     return;
   }
   if ((argv.includes('--help') || argv.includes('-h')) && argv[0] !== 'worker' || !argv.length) {
-    out('ToolsEnabled Fleet host mode: setup | serve | status | agents | worker | tree | ledger | tasks | memory | audit | settings [--state-root ABSOLUTE_PATH]');
+    out('ToolsEnabled Fleet host mode: setup | serve | status | agents | worker | tree | ledger | tasks | memory | audit | settings | interactions [--watch] [--state-root ABSOLUTE_PATH]');
+    out('Owner root opt-in: serve --enable-role-control adds only agent.set_role for an unedited installed root default. This is explicit operator configuration, not proof of human identity; worker-linked invocations and saved role overrides refuse it.');
+    out('Resume a particular existing tree: serve --tree-key ROOT_KEY [--actor EXISTING_ACTOR]; omitted actor remains unbound. Busy, missing or wrong-root keys are refused.');
     out('Read-only panes: tasks [get ID], memory [get NS KEY | --namespace NS --query TEXT], audit verify [--include-archive], settings [get ID], status; add --json for versioned data.');
     out('Read-only text: <ledger|tasks|memory|audit|settings|status> --text [--width 40..240] [--surface SURFACE] [--offset N --limit 1..20].');
     out('Hook dispatcher: fleet-command --input TEXT|--stdin-hook-json --surface SURFACE [--emit].');
@@ -170,6 +176,19 @@ async function main(argv) {
       : require('../src/lib/openshell-worker-command').workerCommand(args);
   }
   const options = parseArgs(argv);
+  if (options.args[0] === 'interactions') {
+    if (options.args.length !== 1 || Object.keys(options).some(key => !['args', 'stateRoot', 'watch'].includes(key)))
+      throw new Error('Use interactions [--watch] --state-root ABSOLUTE_PATH in your own interactive terminal; no answer flags are accepted.');
+    const config = runtime.readHostConfig(options.stateRoot);
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.on('SIGINT', stop);
+    try {
+      return await require('../src/lib/host-interaction-terminal').runInteractionTerminal({
+        stateRoot: config.stateRoot, watch: options.watch === true, signal: controller.signal });
+    } finally { process.removeListener('SIGINT', stop); }
+  }
+  if (options.enableRoleControl && options.args[0] !== 'serve') throw new Error('--enable-role-control applies only to serve.');
   if (options.passEnv !== undefined && options.args[0] !== 'setup') throw new Error('--pass-env applies to setup.');
   if (options.json && options.text) throw new Error('Choose --json or --text.');
   if ((options.width || options.surface) && !options.text) throw new Error('--width and --surface require --text.');
@@ -262,7 +281,7 @@ async function main(argv) {
     out('ToolsEnabled Fleet host mode initialized.'); out('Fleet tools follow how you started your agent, minus role limits. --tier is optional: narrow Fleet tools further.'); out(runtime.HOST_WARNING);
     out(config.workers ? runtime.WORKER_WARNING : 'Workers are off.'); return;
   }
-  if (options.args[0] === 'serve') { await runtime.serveHost(config, { actor: options.actor }); return; }
+  if (options.args[0] === 'serve') { await runtime.serveHost(config, { actor: options.actor, treeKey: options.treeKey ?? null, enableRoleControl: options.enableRoleControl === true }); return; }
   const command = options.args[0];
   const readOnly = command === 'tree'
     || command === 'ledger' && options.args.length === 1

@@ -355,20 +355,27 @@ function setupPluginHost({ stateRoot, workspace, tier = 'unrestricted', workers 
     pluginRebound: Boolean(previousConfig && previousConfig.installRoot !== INSTALL_ROOT) });
 }
 
-async function serveHost(config, { actor } = {}) {
+async function serveHost(config, { actor, treeKey = null, enableRoleControl = false, allowedToolNames } = {}) {
   requireHostEnvironment();
+  if (treeKey && !config.workers) refuse('HOST_WORKERS_DISABLED', 'An existing tree selection requires the saved host worker opt-in.');
   if (config.workers) require('./host-worker-prerequisite').requireHostWorkerNative();
+  if (enableRoleControl && (!config.workers || process.env.TOOLSENABLED_HOST_NODE
+      || process.env.TOOLSENABLED_HOST_TREE_SOCKET || process.env.TOOLSENABLED_HOST_SESSION)) {
+    refuse('HOST_ROLE_CONTROL_ROOT_REQUIRED', 'The explicit role-control option belongs only to the owner root startup, never a worker-linked invocation.');
+  }
   configureHost(config, { actor });
   const machineRecord = require('./setup/machine-record');
   const record = machineRecord.readMachineRecord({ servicesRoot: path.join(config.stateRoot, 'services'), adopt: false });
   if (!record || record.installRoot !== INSTALL_ROOT || record.tier !== config.tier
       || record.workspaceRoots.length !== 1 || record.workspaceRoots[0] !== config.workspace) {
     refuse('HOST_CONFIG_INVALID', config.setupKind === 'plugin'
-      ? 'Run /tefleet setup again in this project to establish the matching permission record.'
+      ? 'Run node bin/toolsenabled-host.js setup --plugin from the installed package folder with the options in its setup guide to establish the matching permission record.'
       : 'Run the host installer setup to establish the matching machine record first.');
   }
   process.stderr.write(`[toolsenabled] ${HOST_WARNING}\n`);
-  const options = { toolSummary: require('./host-descriptions'),
+  if (!actor) process.stderr.write('[toolsenabled] HOST_ACTOR_UNBOUND: no --actor was supplied; ledger mutations require an explicit provider actor at startup.\n');
+  const options = { agentActor: actor || null, toolSummary: require('./host-descriptions'),
+    ...(allowedToolNames === undefined ? {} : { allowedToolNames: Object.freeze([...allowedToolNames]) }),
     setupKind: config.setupKind,
     permissionSession: require('./permission-tier-policy').effectiveSessionFromRecord(
       require('./agents/permission-level').leadLevel({ registry: require('./agents/registry').activeRegistry() }).level, record),
@@ -376,7 +383,7 @@ async function serveHost(config, { actor } = {}) {
   let workers;
   if (config.workers) {
     process.stderr.write(`[toolsenabled] ${WORKER_WARNING}\n`);
-    workers = await require('./host-agent-mode').startHostAgentMode({ config, actor });
+    workers = await require('./host-agent-mode').startHostAgentMode({ config, actor, treeKey, enableRoleControl });
     try { await workers.ready; } catch (error) { await workers.close(); throw error; }
     Object.assign(options, workers.context);
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, () => workers.close().then(

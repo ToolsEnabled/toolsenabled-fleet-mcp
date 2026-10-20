@@ -22,6 +22,7 @@ const { safeLaunchEnvironment } = require('../supervision/launch-environment');
 const windowsJob = require('../windows-job-control');
 const { spawnLinuxOwned } = require('../linux-process-control');
 const { deleteEnvNames } = require('../env-scrub');
+const { assertTextInput } = require('../host-input-content');
 
 // Lazy on purpose: runtime.js pulls in most of the engine and this provider is
 // required while that load is still in progress, so a top-level require here
@@ -822,7 +823,22 @@ function readFileLegacy({ path: target } = {}, dependencies = {}) {
           fail('HOST_FILE_CHANGED_DURING_READ', 'The file changed while it was being admitted; read it again.');
         }
         assertStillNamed(again, 'this file');
-        return { path: resolved, content: fs.readFileSync(descriptor, 'utf8'), bytes: again.size };
+        if (again.size > MAX_FILE_BYTES) fail('HOST_FILE_TOO_LARGE', `file exceeds the ${MAX_FILE_BYTES}-byte limit.`);
+        const bytes = Buffer.alloc(again.size + 1);
+        let count = 0;
+        while (count < bytes.length) {
+          const read = fs.readSync(descriptor, bytes, count, bytes.length - count, null);
+          if (!read) break;
+          count += read;
+        }
+        const after = fs.fstatSync(descriptor);
+        assertStillNamed(after, 'this file');
+        if (count !== again.size || after.size !== again.size || after.mtimeMs !== again.mtimeMs || after.ctimeMs !== again.ctimeMs) {
+          fail('HOST_FILE_CHANGED_DURING_READ', 'The file changed while its bytes were being taken; read it again.');
+        }
+        const content = bytes.subarray(0, count);
+        assertTextInput(content, resolved);
+        return { path: resolved, content: content.toString('utf8'), bytes: content.length };
       } finally { fs.closeSync(descriptor); }
     },
     error => { fs.closeSync(descriptor); throw error; }
@@ -1141,12 +1157,8 @@ function cutsCharacter(left, right) {
   return false;
 }
 
-// A byte window is refused only where it starts or ends inside a character.
-// Bytes that are not UTF-8 decode as a whole-file read decodes them (U+FFFD).
-// Inside a sandbox every read of a long file is a window, and refusing any
-// window that held such a byte left a Latin-1 or binary file over 32 KiB
-// unreadable there, with a refusal that pointed at a whole-file read the
-// sandbox caps at 32 KiB (measured 2026-09-29).
+// The full snapshot is validated as UTF-8 text before a receipt is created.
+// Window boundaries must additionally preserve whole characters.
 function decodeHostWindow(bytes, { preceding = Buffer.alloc(0), following = Buffer.alloc(0) } = {}) {
   const around = Buffer.concat([preceding, bytes, following]);
   const start = preceding.length;
@@ -1325,8 +1337,11 @@ function readFileMediated({ path: target, startByte, endByte } = {}, dependencie
     }
     return hostByteAuthority(scope).observeRead({
       binding, resource, startByte, endByte, assertCurrent,
-      // A window must be character-aligned UTF-8; a whole file decodes as the
-      // legacy reader did (invalid sequences become U+FFFD), never refused.
+      materializeRead: candidate => {
+        const snapshot = materializeHost(candidate);
+        if (snapshot.present !== false) assertTextInput(snapshot.bytes, resolved);
+        return snapshot;
+      },
       validateRead: windowed ? ({ bytes, preceding, following }) => decodeHostWindow(bytes, { preceding, following }) : undefined
       });
   }).then(observed => {

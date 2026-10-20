@@ -138,6 +138,26 @@ function leadLevel({ registry, env = process.env, ...options } = {}) {
   });
 }
 
+// Diagnostics are separate from the long-standing leadLevel return contract.
+// An unknown GUI/remote parent is not proof of the default level: label the
+// fallback explicitly and never manufacture a wider inherited permission.
+function leadPermissionContext(options = {}) {
+  const lead = findLead(options);
+  const detected = lead ? lead.level : DEFAULT_LEVEL;
+  const cap = Number((options.env || process.env).TOOLSENABLED_LEVEL_CAP);
+  const result = { agentId: lead ? lead.agentId : null, detected,
+    level: isLevel(cap) ? narrowest(detected, cap) : detected };
+  return Object.freeze({ ...result,
+    source: lead ? 'ancestor-cli' : 'unknown-parent-fallback',
+    verifiedParent: Boolean(lead),
+    permissionPolicyVerified: false,
+    reason: lead ? 'level-derived-from-cli-arguments' : 'parent-cli-not-observable',
+    fallback: !lead,
+    cap: isLevel(Number((options.env || process.env).TOOLSENABLED_LEVEL_CAP))
+      ? Number((options.env || process.env).TOOLSENABLED_LEVEL_CAP) : null,
+  });
+}
+
 /** How to start this agent as a worker at a level, from its descriptor. */
 /* The exact options that start a lead at level 4, read from its own
    descriptor, for refusal text only: the lead Fleet found, or every described
@@ -208,5 +228,5 @@ function nativeRemovalSettings(descriptor, removals = []) {
 module.exports = Object.freeze({
   LEVEL, LEVEL_NAMES, DEFAULT_LEVEL, isLevel, narrowest,
   NATIVE_TOOL_CATEGORIES, nativeToolRemovals, nativeRemovalSettings,
-  parseArgv, levelFromArgv, agentOfArgv, findLead, leadLevel, workerSettings, assertWorkerLevel, noPromptsHint
+  parseArgv, levelFromArgv, agentOfArgv, findLead, leadLevel, leadPermissionContext, workerSettings, assertWorkerLevel, noPromptsHint
 });

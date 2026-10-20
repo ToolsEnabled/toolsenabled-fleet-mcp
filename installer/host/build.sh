@@ -29,6 +29,8 @@ git show HEAD:installer/host/install.sh > "$package_dir/install.sh"
 git show HEAD:installer/host/host_install.py > "$package_dir/host_install.py"
 git show HEAD:installer/host/host_registration.py > "$package_dir/host_registration.py"
 git show HEAD:installer/openshell/fleet_fs.py > "$package_dir/fleet_fs.py"
+git show HEAD:installer/host/handoff_preflight.py > "$package_dir/handoff_preflight.py"
+git show HEAD:installer/host/owner_handoff.py > "$package_dir/owner_handoff.py"
 cat > "$package_dir/toolsenabled" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail

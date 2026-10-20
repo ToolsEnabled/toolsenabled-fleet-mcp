@@ -12,6 +12,9 @@ const {
   supportsConfinedTreeSpawn,
   supportsConfinedTreeLifecycle,
   supportsResumeAssignment,
+  supportsConfinedSpeedControl,
+  supportsConfinedConfigurationControl,
+  supportsConfinedContinuationControl,
 } = require('./tree-host-registry');
 
 /* The lifecycle verbs an assistant may ask for on a circle BELOW it.
@@ -29,6 +32,8 @@ const TREE_ACTIONS = Object.freeze({
   remove: 'remove-node',
   'set-model': 'set-node-model',
   'set-effort': 'set-node-effort',
+  'set-speed': 'set-node-speed',
+  'set-continuation': 'set-node-continuation',
   'set-account': 'set-node-account',
   'set-provider': 'set-node-provider',
   'set-role': 'set-node-role',
@@ -179,7 +184,13 @@ async function commandOnTree(verb, request) {
     );
   }
   const confined = request?.confined === true;
-  if (confined && (!['resume', 'restart'].includes(verb) || !supportsConfinedTreeLifecycle())) {
+  const speedControl = confined && verb === 'set-speed';
+  if (speedControl && !supportsConfinedSpeedControl()) fail('TREE_SPEED_CONTROL_REFUSED', 'This host has no confined speed-control adapter.');
+  const configurationControl = confined && ['set-model', 'set-effort', 'set-role'].includes(verb);
+  if (configurationControl && !supportsConfinedConfigurationControl()) fail('TREE_CONFIGURATION_CONTROL_REFUSED', 'This host has no confined model, effort or role control adapter.');
+  const continuationControl = confined && verb === 'set-continuation';
+  if (continuationControl && !supportsConfinedContinuationControl()) fail('TREE_CONTINUATION_CONTROL_REFUSED', 'This host has no confined assigned-task continuation adapter.');
+  if (confined && !speedControl && !configurationControl && !continuationControl && (!['resume', 'restart'].includes(verb) || !supportsConfinedTreeLifecycle())) {
     fail('TREE_DELEGATION_REFUSED', 'This build cannot safely replace a Standard tree circle.');
   }
   if (!confined && typeof treeSpawnHost().command !== 'function') {
@@ -188,6 +199,8 @@ async function commandOnTree(verb, request) {
       'The application that owns the tree does not offer this action in this build.'
     );
   }
+  if (verb === 'set-continuation' && treeSpawnHost().ledgerContinuationVersion !== 1)
+    fail('CONTINUATION_UNSUPPORTED', 'This host does not provide assigned-task continuation.');
   const action = TREE_ACTIONS[verb];
   if (!action) fail('AGENT_TREE_COMMAND_UNKNOWN', `"${verb}" is not something that can be done to a circle.`);
   const parentSessionId = request && request.parentSessionId;
@@ -215,7 +228,10 @@ async function commandOnTree(verb, request) {
         'This application cannot hand an assignment to a resumed circle yet, so nothing was resumed. Resume without an assignment, then send it as a message.');
     }
   }
-  const command = confined ? treeSpawnHost().commandConfined.bind(treeSpawnHost()) : treeSpawnHost().command.bind(treeSpawnHost());
+  const command = speedControl ? treeSpawnHost().commandSpeedConfined.bind(treeSpawnHost())
+    : continuationControl ? treeSpawnHost().commandContinuationConfined.bind(treeSpawnHost())
+    : configurationControl ? treeSpawnHost().commandConfigurationConfined.bind(treeSpawnHost())
+    : confined ? treeSpawnHost().commandConfined.bind(treeSpawnHost()) : treeSpawnHost().command.bind(treeSpawnHost());
   return command({
     action,
     ...(verb.startsWith('set-') ? { choice: request.choice } : {}),

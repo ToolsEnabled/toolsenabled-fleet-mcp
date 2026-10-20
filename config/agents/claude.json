@@ -69,6 +69,14 @@
         {
           "version": "2.1.293",
           "versionOutput": "2.1.293 (Claude Code)\n"
+        },
+        {
+          "version": "2.1.295",
+          "versionOutput": "2.1.295 (Claude Code)\n"
+        },
+        {
+          "version": "2.1.302",
+          "versionOutput": "2.1.302 (Claude Code)\n"
         }
       ],
       "absentStderr": "No MCP server named \"{name}\" in user scope\n",

@@ -1,7 +1,7 @@
 {
-  "name": "toolsenabled-fleet-mcp",
-  "version": "1.9.0",
-  "description": "Independent Fleet MCP workers-off Standard-tier coordination core for Codex.",
+  "name": "toolsenabled-fleet",
+  "version": "1.9.2-rc.1",
+  "description": "Shared project tasks, local memory and coordinated file edits.",
   "author": {
     "name": "ToolsEnabled, Inc.",
     "email": "support@toolsenabled.ai"
@@ -24,16 +24,17 @@
     }
   },
   "interface": {
-    "displayName": "Independent Fleet MCP",
+    "displayName": "ToolsEnabled Fleet",
     "shortDescription": "Coordinate local project work",
-    "longDescription": "Independent Fleet MCP workers-off Standard-tier coordination core for Codex.",
+    "longDescription": "Coordinate project tasks, ledger progress, local memory, search and file edits in an explicitly selected workspace. This package requires Standard permissions with workers off.",
     "developerName": "ToolsEnabled, Inc.",
     "category": "Productivity",
     "websiteURL": "https://toolsenabled.ai",
-    "privacyPolicyURL": "https://toolsenabled.ai/privacy/",
+    "privacyPolicyURL": "https://github.com/ToolsEnabled/toolsenabled-fleet-mcp/blob/main/PRIVACY.md",
     "capabilities": [
       "Read",
       "Write"
-    ]
+    ],
+    "supportURL": "https://github.com/ToolsEnabled/toolsenabled-fleet-mcp/issues"
   }
 }

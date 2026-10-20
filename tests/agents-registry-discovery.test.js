@@ -50,6 +50,20 @@ test('the bundled registry names its agents equally and keeps every earlier work
   assert.equal(loaded.get('gemini').worker.driver, 'acp');
 });
 
+test('current Codex worker aliases select Sol 6.1 and Luna 6 without changing provider permissions', () => {
+  const loaded = registry.loadRegistry({ userDir: null });
+  const codex = loaded.get('codex');
+  assert.equal(loaded.choices.sol.model, 'gpt-6.1-sol');
+  assert.equal(loaded.choices.sol.cliModel, 'gpt-6.1-sol');
+  assert.equal(loaded.choices.luna.model, 'gpt-6-luna');
+  assert.equal(loaded.choices.luna.cliModel, 'gpt-6-luna');
+  assert.ok(codex.models.efforts.includes('xhigh'));
+  assert.ok(loaded.choices.luna.efforts.includes('xhigh'));
+  assert.equal(loaded.choices.luna.efforts.includes('ultra'), false);
+  assert.equal(codex.permissions.worker['3'].sandbox, 'workspace-write');
+  assert.equal(codex.permissions.worker['3'].approvalPolicy, 'never');
+});
+
 test('a descriptor with an unknown field, a path as command, or a bad driver is refused', () => {
   assert.throws(() => registry.validateDescriptor({ ...descriptor(), extra: 1 }), { code: 'AGENT_DESCRIPTOR_INVALID' });
   assert.throws(() => registry.validateDescriptor(descriptor({ command: '/usr/bin/sample' })), { code: 'AGENT_DESCRIPTOR_INVALID' });

@@ -55,6 +55,8 @@ class HostArchiveMappingTest(unittest.TestCase):
             "installer/openshell/fleet_fs.py": b"filesystem helper\n",
             "installer/host/host_install.py": b"host install helper\n",
             "installer/host/host_registration.py": b"host registration helper\n",
+            "installer/host/handoff_preflight.py": b"handoff preflight helper\n",
+            "installer/host/owner_handoff.py": b"owner handoff helper\n",
         }
         blobs = {name: (content, 0o644) for name, content in sources.items()}
         base = "toolsenabled-installer/"
@@ -64,12 +66,15 @@ class HostArchiveMappingTest(unittest.TestCase):
             base + "fleet_fs.py": sources["installer/openshell/fleet_fs.py"],
             base + "host_install.py": sources["installer/host/host_install.py"],
             base + "host_registration.py": sources["installer/host/host_registration.py"],
+            base + "handoff_preflight.py": sources["installer/host/handoff_preflight.py"],
+            base + "owner_handoff.py": sources["installer/host/owner_handoff.py"],
             base + "toolsenabled": (ROOT / "installer/host/build.sh").read_bytes().split(
                 b"<<'WRAPPER'\n", 1)[1].split(b"\nWRAPPER\n", 1)[0] + b"\n",
         }
         with tempfile.TemporaryDirectory() as directory:
             archive_path = pathlib.Path(directory) / "host.tar.gz"
-            for changed in [None, base + "host_install.py", base + "host_registration.py", base + "toolsenabled"]:
+            for changed in [None, base + "host_install.py", base + "host_registration.py", base + "handoff_preflight.py",
+                            base + "owner_handoff.py", base + "toolsenabled"]:
                 with tarfile.open(archive_path, "w:gz") as archive:
                     for name, content in members.items():
                         if name == changed:

@@ -71,6 +71,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     failAfterTools = script.failAfterTools === true;
     failMessage = typeof script.failMessage === 'string' ? script.failMessage : null;
     update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Fixture thinking.' } });
+    // An extension request a Fleet client does not offer; its answer resumes the turn.
+    if (script.askFirst === true || text.includes('[[ask-first]]')) {
+      send({ id: 'fixture-ask-1', method: '_fixture/ask', params: { sessionId: 'fixture-session', question: 'May I?' } });
+      return;
+    }
+    nextTool();
+  } else if (id === 'fixture-ask-1' && Object.hasOwn(message, 'error')) {
     nextTool();
   } else if (method === 'session/cancel') {
     if (prompt !== null) { result(prompt, { stopReason: 'cancelled' }); prompt = null; }

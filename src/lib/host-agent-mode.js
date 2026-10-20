@@ -25,6 +25,26 @@ function confinedTreeHost(host, config) {
   return Object.freeze({ ...host,
     confinedTreeSpawnVersion: 1,
     confinedTreeLifecycleVersion: 1,
+    confinedContinuationControlVersion: 1,
+    commandContinuationConfined: request => {
+      exactWorkspace();
+      if (request?.action !== 'set-node-continuation') throw refusal('TREE_CONTINUATION_CONTROL_REFUSED', 'This host control accepts only continuation over already assigned tree tasks.');
+      return host.command(request);
+    },
+    confinedConfigurationControlVersion: 1,
+    commandConfigurationConfined: request => {
+      exactWorkspace();
+      if (!['set-node-model', 'set-node-effort', 'set-node-role'].includes(request?.action)) {
+        throw refusal('TREE_CONFIGURATION_CONTROL_REFUSED', 'This host control accepts only model, effort or role selection on the retained tree.');
+      }
+      return host.command(request);
+    },
+    confinedSpeedControlVersion: 1,
+    commandSpeedConfined: request => {
+      exactWorkspace();
+      if (request?.action !== 'set-node-speed') throw refusal('TREE_SPEED_CONTROL_REFUSED', 'The speed control accepts only a speed selection.');
+      return host.command(request);
+    },
     spawnConfined: request => {
       exactWorkspace();
       if (request?.workspaceRoot !== config.workspace || request.research !== undefined) {
@@ -90,13 +110,17 @@ function absentSocket(socketPath, env) {
   // startup makes recovery possible without the shared link's stale unlink.
   throw refusal('HOST_WORKER_SOCKET_UNSAFE', 'The worker socket path already exists; it was preserved. Retry to select a fresh private socket name.');
 }
-function startHostAgentMode({ config, actor, env = process.env, listen = true,
+function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl = false, env = process.env, listen = true,
   installTreeSpawnHost = require('./tree-host-registry').installTreeSpawnHost,
   createHost = shared.createOpenShellAgentHost,
   createLauncher = options => require('./host-worker-session').createHostWorkerLauncher(options),
   socketName = () => `${crypto.randomBytes(6).toString('hex')}.sock`,
 } = {}) {
   if (config?.mode !== 'host' || config.workers !== true) return null;
+  if (typeof enableRoleControl !== 'boolean') throw refusal('HOST_ROLE_CONTROL_INVALID', 'Role control must be an explicit boolean startup selection.');
+  if (enableRoleControl && (env.TOOLSENABLED_HOST_NODE || env.TOOLSENABLED_HOST_TREE_SOCKET || env.TOOLSENABLED_HOST_SESSION)) {
+    throw refusal('HOST_ROLE_CONTROL_ROOT_REQUIRED', 'The explicit role-control option belongs only to the owner root startup, never a worker-linked invocation.');
+  }
   if (env.TOOLSENABLED_RUNTIME_MODE !== 'host') throw refusal('HOST_WORKERS_DISABLED', 'Host mode must be selected explicitly.');
   const clean = Object.fromEntries(Object.entries(env).filter(([name]) => name !== 'OPENSHELL_SANDBOX' && !name.startsWith('TOOLSENABLED_OPENSHELL_')));
   clean.TOOLSENABLED_HOST_WORKERS = '1';
@@ -109,7 +133,7 @@ function startHostAgentMode({ config, actor, env = process.env, listen = true,
       throw refusal('HOST_WORKER_LINK_INVALID', 'A host worker needs its bound node, session and Unix socket.');
     }
     const token = workerToken(clean, config);
-    const host = shared.createOpenShellTreeClient({ socketPath, token, sessionId });
+    const host = shared.createOpenShellTreeClient({ socketPath, token, sessionId, ledgerContinuationVersion: 1 });
     const names = String(clean.TOOLSENABLED_TOOL_ALLOWLIST || '').split(',').filter(Boolean);
     if (!names.length) throw refusal('HOST_WORKER_LINK_INVALID', 'A host worker needs its narrowed tool list.');
     const roleId = clean.TOOLSENABLED_HOST_ROLE || null;
@@ -132,17 +156,20 @@ function startHostAgentMode({ config, actor, env = process.env, listen = true,
   // state; the socket itself never lives under the state-root pathname.
   runtimeSocket.runtimeSocketPath(path.join(config.stateRoot, 'workers', store.TREE_FOLDER, `${agentId}-32`, name),
     { env: clean, create: false });
-  const tree = store.acquireTree({ stateRoot: path.join(config.stateRoot, 'workers'), baseKey: agentId, root });
+  const tree = store.acquireTree({ stateRoot: path.join(config.stateRoot, 'workers'), baseKey: agentId, root, preferredKey: treeKey });
+  if (treeKey && tree.document.root?.displayName) root.displayName = tree.document.root.displayName;
   let socketPath;
   try { socketPath = runtimeSocket.runtimeSocketPath(path.join(tree.folder, name), { env: clean }); }
   catch (error) { tree.release(); throw error; }
   let host;
+  const interactions = require('./host-worker-interactions').createInteractionBroker();
+  let interactionTerminal;
   let server;
   let ready;
   let cleaned;
   const cleanup = () => {
     if (!cleaned) cleaned = (async () => {
-      try { if (host) await host.closeAll(); }
+      try { interactions.close(); if (interactionTerminal) await interactionTerminal.close(); if (host) await host.closeAll(); }
       finally {
         try { if (server) await server.close(); }
         finally { tree.release(); }
@@ -153,7 +180,7 @@ function startHostAgentMode({ config, actor, env = process.env, listen = true,
   try {
     absentSocket(socketPath, clean);
     const folder = workerFolder(config);
-    const launcher = createLauncher({ env: clean, config, workspaceRoot: folder, socketPath });
+    const launcher = createLauncher({ env: clean, config, workspaceRoot: folder, socketPath, interactionBroker: listen ? interactions : null });
     // A plugin setup may limit subagents to some agent CLIs. The limit comes
     // from the saved setup, not from the OpenShell variables removed above.
     const limitsFor = saved => shared.rootLimits({ ...clean,
@@ -165,14 +192,16 @@ function startHostAgentMode({ config, actor, env = process.env, listen = true,
       ? { limits: () => { const live = require('./host-runtime').currentPluginLimits();
         return limitsFor(live && live.workers ? live : config); } }
       : config.providers || config.models ? { limits: limitsFor(config) } : {};
-    host = createHost({ mode: 'host', rootSessionId, workspaceRoot: folder, env: clean, launcher, recordedTier: config.tier || 'unrestricted', ...limits,
+    host = createHost({ mode: 'host', enableRoleControl, rootSessionId, workspaceRoot: folder, env: clean, launcher, recordedTier: config.tier || 'unrestricted', ...limits,
       root, document: tree.document, persist: document => store.saveTree(tree.treeFile, document), nodeFolder: tree.nodeFolder,
       codexEndpoint: () => null });
     server = listen ? link.createTreeLinkServer({ socketPath, refuseExisting: true,
       handle: (token, op, request) => host.handleLink(token, op, request) }) : null;
-    ready = store.settleLoadedTree(tree.document).then(() => {
+    ready = store.settleLoadedTree(tree.document).then(async () => {
       store.saveTree(tree.treeFile, tree.document);
       if (server) {
+        interactionTerminal = await require('./host-interaction-terminal').startInteractionTerminal({
+          stateRoot: config.stateRoot, broker: interactions, env: clean });
         absentSocket(socketPath, clean);
         return server.listen();
       }
