@@ -786,6 +786,12 @@ function sessionHandle({ adapter, transport, threadId, extra = {}, cleanup = nul
     adapter,
     threadId,
     ...extra,
+    async quiesce() {
+      closed = true;
+      try { adapter.close(); } finally {
+        try { await transport.closeForStartupFailure(); } finally { if (cleanup) cleanup(); }
+      }
+    },
     close() {
       if (closed) return;
       closed = true;

@@ -93,6 +93,7 @@ async function openAcpSession({ provider, cwd, env = process.env, level = levels
     if (threadOptions.effort) await startup.wait(() => adapter.selectEffort(started.threadId, threadOptions.effort));
     return Object.freeze({ adapter, threadId: started.threadId, level, apiMode, turnCompletion: 'event',
       ...(transport.processGroup ? { processGroup: transport.processGroup } : {}),
+      async quiesce() { try { adapter.close(); } finally { await transport.closeForStartupFailure(cleanupTimeoutMs); } },
       close() { try { adapter.close(); } finally { transport.close(); } } });
   } catch (error) {
     const nestedCleanup = typeof error?.retryCleanup === 'function' ? error.retryCleanup.bind(error) : null;

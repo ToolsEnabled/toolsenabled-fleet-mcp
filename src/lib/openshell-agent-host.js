@@ -412,6 +412,12 @@ function createOpenShellAgentHost({
   // Every worker below it starts at that level or lower.
   leadLevel = () => require('./agents/permission-level').leadPermissionContext({ registry: KNOWN_AGENTS, env }),
   unrestrictedFileRoot = false,
+  fleetV2 = env.TOOLSENABLED_FLEET_PROFILE === 'fleetV2',
+  getMessagePolicy = () => require('./fleet-v2-message-policy').readPolicy(),
+  getAssignment = null,
+  recordAssignment = null,
+  controlRequest = null,
+  folderScope = null,
   continuationLedger = () => require('./owner-request-store').readAll({ kinds: ['T'], includeRemoved: true }),
   continuationEnabled = () => require('./runtime-policy').runtimePolicy().continuationEnabled,
 } = {}) {
@@ -431,8 +437,13 @@ function createOpenShellAgentHost({
   if (!launcher || typeof launcher.start !== 'function') {
     throw refusal('OPENSHELL_AGENT_HOST_INVALID', 'The OpenShell agent tree needs a way to start its workers.');
   }
+  if (fleetV2 && env.TOOLSENABLED_HOST_SETUP_KIND === 'plugin')
+    throw refusal('FLEET_PROFILE_REFUSED', 'fleetV2 is available only in standalone host mode.');
+  let folderTransition = false;
+  if (fleetV2 && folderScope) folderScope = require('./fleet-folder-scope').normalize(folderScope);
   const document = storedDocument || { v: 1, treeKey: TREE_ID, root: {}, counter: 0, nodes: [], inbox: [] };
   document.nodes = Array.isArray(document.nodes) ? document.nodes : [];
+  if (fleetV2) for (const node of document.nodes) node.folderScope = folderScope;
   document.inbox = Array.isArray(document.inbox) ? document.inbox : [];
   // Complete reports survive delivery, later turns, and server restarts. The
   // tree's atomic private snapshot owns them; tool/list views expose previews.
@@ -500,6 +511,7 @@ function createOpenShellAgentHost({
     },
     queue: nodeId => byId(nodeId)?.queue || [],
     adapter: nodeId => live.get(nodeId)?.session?.adapter,
+    canDeliver: (nodeId, options) => !fleetV2 || require('./fleet-v2-message-policy').decision(getMessagePolicy(), byId(nodeId)?.queue || [], options).allowed,
     format: (nodeId, batch) => courierTurn(byId(nodeId), batch),
     commit: () => persist(document),
   });
@@ -954,16 +966,34 @@ function createOpenShellAgentHost({
     controlDelivery.notify();
     if (!running(recipient)) return 'held';
     scheduleFlush(recipient);
-    return recipient.turn === 'running' ? 'queued' : 'delivered';
+    return fleetV2 || recipient.turn === 'running' ? 'queued' : 'delivered';
   }
 
   function scheduleFlush(node) {
+    if (fleetV2) {
+      const state = liveOf(node);
+      let choice;
+      try { choice = require('./fleet-v2-message-policy').decision(getMessagePolicy(), node.queue || [], { active: node.turn === 'running' }); }
+      catch { return; } // Keep unread messages until the policy is readable again.
+      if (choice.delayMs > 0) {
+        if (!state.messageTimer) {
+          state.messageTimer = setTimeout(() => { state.messageTimer = null; scheduleFlush(node); controlDelivery.notify(); }, choice.delayMs);
+          state.messageTimer.unref?.();
+        }
+        return;
+      }
+      if (!choice.allowed) return;
+    }
     serial(node, () => flushQueue(node)).catch(() => {});
   }
 
   async function flushQueue(node) {
     const state = liveOf(node);
     if (!running(node) || node.turn !== 'idle' || !Array.isArray(node.queue) || node.queue.length === 0) return false;
+    if (fleetV2) {
+      const choice = require('./fleet-v2-message-policy').decision(getMessagePolicy(), node.queue, { active: false });
+      if (!choice.allowed) { scheduleFlush(node); return false; }
+    }
     if (!controlDelivery.available(node.nodeId)) return false;
     try { controlDelivery.admitWork(node.nodeId); } catch (error) {
       if (error.code === 'CONTROL_DRAIN_HELD') return false;
@@ -1165,6 +1195,7 @@ function createOpenShellAgentHost({
     controlDelivery.admitWork(node.nodeId);
     const state = liveOf(node);
     const session = state.session;
+    if (fleetV2 && state.pauseRequested) throw refusal('FLEET_ACTION_STALE', 'Execution is paused; resume with the current task revision.');
     if (!session) throw refusal('OPENSHELL_AGENT_NOT_RUNNING', `${node.displayName} is not running.`);
     const request = { threadId: session.threadId, text };
     if (driverOf(node.provider) === 'app-server' && node.model && state.sessionModel !== node.model) {
@@ -1341,6 +1372,7 @@ function createOpenShellAgentHost({
       }
       session = await launcher.start({
         provider: node.provider,
+        fleetV2, folderScope: node.folderScope || folderScope,
         level: node.level,
         parentSessionId: state.launchParentSessionId,
         permissionContext: node.permissionContext,
@@ -1427,6 +1459,8 @@ function createOpenShellAgentHost({
   async function closeSession(session) {
     if (!session) return;
     const group = session.processGroup || null;
+    if (fleetV2 && typeof session.quiesce === 'function') { await session.quiesce(); return; }
+    if (fleetV2 && !group) throw refusal('FLEET_QUIESCENCE_UNPROVEN', 'The worker adapter cannot prove all execution has stopped.');
     try { session.close(); } catch { /* already closing */ }
     if (!group) return;
     // A closing CLI is given a moment to finish its transcript, then its whole group is ended.
@@ -1438,7 +1472,8 @@ function createOpenShellAgentHost({
   /** End the live session, if any; the circle keeps its place and its conversation. */
   async function endSession(node, { state: after = 'stopped', note = null, error = null } = {}) {
     const state = liveOf(node);
-    const session = state.session;
+    clearTimeout(state.messageTimer); state.messageTimer = null;
+    const session = state.session || state.retiringSession || null;
     const turnWasRunning = node.turn === 'running';
     if (state.launchPolicy) launchPolicy.host.closeLaunch(state.launchPolicy.handle);
     state.launchPolicy = null;
@@ -1446,6 +1481,7 @@ function createOpenShellAgentHost({
     // Tool calls this session left open can no longer be closed by it.
     controlDelivery.retire(node.nodeId);
     state.session = null;
+    state.retiringSession = session;
     state.token = null;
     if (session && turnWasRunning && state.activeTurnId) {
       try {
@@ -1455,7 +1491,12 @@ function createOpenShellAgentHost({
         ]);
       } catch { /* ended below either way */ }
     }
-    await closeSession(session);
+    try { await closeSession(session); } catch (failure) {
+      node.state = 'failed'; node.turn = 'none';
+      node.error = { code: failure.code || 'FLEET_QUIESCENCE_UNPROVEN', message: 'Owned execution cleanup is unproven; retry stop before resuming.' };
+      save(); throw failure;
+    }
+    state.retiringSession = null;
     if (!session && node.process) await terminate(node.process, { graceMs: 1000 });
     node.process = null;
     state.activeTurnId = null;
@@ -1508,6 +1549,7 @@ function createOpenShellAgentHost({
   }
 
   async function addWorker(request = {}) {
+    if (folderTransition) throw refusal('FLEET_FOLDER_TRANSITION', 'Parent folders are changing; retry after all workers quiesce.');
     AGENTS.assertWorkerAvailable(KNOWN_AGENTS, request.provider);
     AGENTS.assertWorkerAvailable(KNOWN_AGENTS, KNOWN_AGENTS.choices[request.tier]?.provider);
     const caller = callerFromSession(request.parentSessionId);
@@ -1530,7 +1572,7 @@ function createOpenShellAgentHost({
     // On this computer a slot is a live subagent: finished ones from an earlier
     // session, or stopped ones, stay resumable but do not block new ones.
     const used = childrenOf(parentNodeId).filter(child => mode !== 'host'
-      || Boolean(live.get(child.nodeId)?.session) || child.state === 'starting').length;
+      || Boolean(live.get(child.nodeId)?.session || live.get(child.nodeId)?.retiringSession) || child.state === 'starting').length;
     const bounds = slotBounds || savedSlotBounds({ env });
     if (used >= bounds.maxChildren) {
       throw refusal('TREE_SLOT_LIMIT', mode === 'host'
@@ -1577,6 +1619,7 @@ function createOpenShellAgentHost({
       model: codexModelFor(row.provider, request.tier),
       effort: typeof request.effort === 'string' && request.effort ? request.effort : null,
       brief: request.brief,
+      ...(fleetV2 ? { folderScope: caller.kind === 'node' ? caller.node.folderScope || folderScope : folderScope, assignmentRevision: request.assignmentRevision || null } : {}),
       objectiveRef: request.objectiveRef || null,
       state: 'starting',
       turn: 'none',
@@ -1590,6 +1633,12 @@ function createOpenShellAgentHost({
       updatedAt: now(),
     };
     document.nodes.push(node);
+    if (fleetV2 && typeof recordAssignment === 'function') {
+      await recordAssignment(node.nodeId, node.brief);
+      const current = typeof getAssignment === 'function' ? await getAssignment(node.nodeId) : null;
+      if (current?.completed) throw refusal('FLEET_TASK_COMPLETED', 'This durable task is completed; replace it explicitly before resuming.');
+      if (current) { node.brief = current.text; node.assignmentRevision = current.revision; node.taskRevision = current.taskRevision || 1; }
+    }
     save();
     try {
       await serial(node, () => startSession(node, { firstTurn: compositionFor(node, node.brief) }));
@@ -1639,10 +1688,19 @@ function createOpenShellAgentHost({
     return node;
   }
 
+  async function pauseNode(node, caller) {
+    continuation.pause(node, 'paused-by-manager');
+    const state = liveOf(node);
+    state.pauseRequested = true;
+    node.queue = [];
+    const turnWasRunning = await endSession(node, { state: 'paused', note: 'Execution quiesced; resume adopts current task and rules.' });
+    return receipt(node, caller, { action: 'pause-node', paused: true, quiescent: true, turnWasRunning });
+  }
+
   async function stopNode(node, caller) {
     continuation.pause(node, 'stopped-by-manager');
     const state = liveOf(node);
-    if (!state.session) {
+    if (!state.session && !state.retiringSession) {
       if (!node.sessionId) throw refusal('MC_TREE_COMMAND_STOP_UNAVAILABLE', `${node.displayName} has no session to stop.`);
       return receipt(node, caller, { action: 'stop-node', stopped: false, alreadyStopped: true, lastTurn: node.lastTurn || null });
     }
@@ -1658,9 +1716,15 @@ function createOpenShellAgentHost({
     continuation.pause(node, 'restarted-by-manager');
     AGENTS.assertWorkerAvailable(KNOWN_AGENTS, node.provider);
     AGENTS.assertWorkerAvailable(KNOWN_AGENTS, node.pending?.provider);
-    if (liveOf(node).session) await endSession(node, { state: 'stopped' });
+    if (liveOf(node).session || liveOf(node).retiringSession) await endSession(node, { state: 'stopped' });
     applyPendingToRecord(node, ['turn-boundary', 'next-start', 'next-session']);
     node.lastTurn = null;
+    if (fleetV2) {
+      const current = typeof getAssignment === 'function' ? await getAssignment(node.nodeId) : null;
+      if (current?.completed) throw refusal('FLEET_TASK_COMPLETED', 'This durable task is completed; replace it explicitly before resuming.');
+      if (current) { node.brief = current.text; node.assignmentRevision = current.revision; node.taskRevision = current.taskRevision || 1; }
+      node.queue = []; liveOf(node).pauseRequested = false;
+    }
     await startSession(node, { firstTurn: compositionFor(node, node.brief) });
     return receipt(node, caller, { action: 'fresh-start-existing-node', restarted: true, firstTurnState: 'submitted' });
   }
@@ -1679,7 +1743,7 @@ function createOpenShellAgentHost({
     AGENTS.assertWorkerAvailable(KNOWN_AGENTS, node.provider);
     AGENTS.assertWorkerAvailable(KNOWN_AGENTS, node.pending?.provider);
     const state = liveOf(node);
-    if (state.session || node.state === 'starting') {
+    if (state.session || state.retiringSession || node.state === 'starting') {
       throw refusal('MC_TREE_COMMAND_RESUME_REFUSED', `${node.displayName} is running. Stop it before resuming it, or send it a message.`);
     }
     if (!node.threadId) {
@@ -1687,6 +1751,29 @@ function createOpenShellAgentHost({
     }
     const providerChange = node.pending && node.pending.provider && node.pending.provider !== node.provider;
     applyPendingToRecord(node, ['turn-boundary', 'next-start', 'next-session']);
+    if (fleetV2) {
+      const current = typeof getAssignment === 'function' ? await getAssignment(node.nodeId) : null;
+      if (current?.completed) throw refusal('FLEET_TASK_COMPLETED', 'This durable task is completed; replace it explicitly before resuming.');
+      if (current) {
+        if (typeof current.text !== 'string' || !current.text.trim() || !current.revision)
+          throw refusal('FLEET_ASSIGNMENT_INVALID', 'Current task/rules revision is unavailable.');
+        if (current.taskRevision !== undefined && node.taskRevision !== undefined && current.taskRevision !== node.taskRevision && getMessagePolicy().resetAfterTask) {
+          node.threadId = null;
+          node.lastTurn = null;
+        }
+        assignment = current.text;
+        node.brief = current.text;
+        node.taskRevision = current.taskRevision || node.taskRevision || 1;
+        node.assignmentRevision = current.revision;
+      }
+      if (assignment && typeof assignment === 'object') {
+        node.assignmentRevision = assignment.revision || node.assignmentRevision;
+        assignment = assignment.text;
+      }
+      node.queue = [];
+      state.pauseRequested = false;
+      if (!assignment) assignment = node.brief;
+    }
     const firstTurn = assignment ? framedAssignment(caller, assignment) : null;
     if (!node.threadId) {
       // A provider or generic model change starts a new conversation.
@@ -1709,7 +1796,7 @@ function createOpenShellAgentHost({
   }
 
   function removeNode(node, caller) {
-    if (liveOf(node).session || node.state === 'starting') {
+    if (liveOf(node).session || liveOf(node).retiringSession || node.state === 'starting') {
       throw refusal('MC_TREE_COMMAND_REMOVE_REFUSED', `${node.displayName} is still running. Stop it first.`);
     }
     if (childrenOf(node.nodeId).length > 0) {
@@ -1949,11 +2036,22 @@ function createOpenShellAgentHost({
     // Refuse an inadmissible request before it waits in a queue at all, and use
     // the node it names to choose that queue.
     const queued = admit().node;
+    const queuedState = liveOf(queued);
+    if (fleetV2 && ['pause-node', 'stop-node'].includes(request.action)) {
+      queuedState.controlEpoch = (queuedState.controlEpoch || 0) + 1;
+      queuedState.pauseRequested = true;
+    }
+    const commandEpoch = queuedState.controlEpoch || 0;
     const run = operation => serial(queued, () => {
+      if (fleetV2 && (liveOf(queued).controlEpoch || 0) !== commandEpoch)
+        throw refusal('FLEET_ACTION_STALE', 'This queued action predates a lifecycle change.');
       const { caller, node } = admit();
       return operation(node, caller);
     });
     switch (request.action) {
+      case 'pause-node':
+        if (!fleetV2) throw refusal('OPENSHELL_AGENT_ACTION_UNSUPPORTED', 'Pause requires fleetV2.');
+        return run((node, caller) => pauseNode(node, caller));
       case 'stop-node': return run((node, caller) => stopNode(node, caller));
       case 'fresh-start-existing-node': return run((node, caller) => restartNode(node, caller));
       case 'resume-node': return run((node, caller) => resumeNode(node, caller, request.assignment || null));
@@ -1985,7 +2083,12 @@ function createOpenShellAgentHost({
     const manager = caller.kind === 'root' ? null
       : caller.node.parentNodeId ? { kind: 'node', node: byId(caller.node.parentNodeId) } : { kind: 'root' };
     const reports = childrenOf(caller.kind === 'root' ? null : caller.node.nodeId);
-    return { manager, reports };
+    // All first-row builders share a messaging circle; descendants inherit it.
+    // Lifecycle authority remains nodeFor's strict ancestry check.
+    const peers = fleetV2 && caller.kind === 'node'
+      ? document.nodes.filter(node => node.nodeId !== caller.node.nodeId
+        && node !== manager?.node && !reports.includes(node)) : [];
+    return { manager, reports, peers };
   }
 
   function rosterRow(node, relation) {
@@ -2000,7 +2103,7 @@ function createOpenShellAgentHost({
 
   async function roster(args = {}, context = {}) {
     const caller = callerFromContext(context);
-    const { manager, reports } = connectionsOf(caller);
+    const { manager, reports, peers } = connectionsOf(caller);
     return Object.freeze({
       ok: true,
       self: caller.name,
@@ -2010,19 +2113,21 @@ function createOpenShellAgentHost({
           ? Object.freeze({ name: rootInfo.displayName, agentId: ROOT, relation: 'manager', state: 'running' })
           : rosterRow(manager.node, 'manager')] : []),
         ...reports.map(node => rosterRow(node, 'reports-to-sender')),
+        ...peers.map(node => rosterRow(node, 'linked-peer')),
       ],
       ...reportsFor(caller),
     });
   }
 
   function resolveRecipient(caller, to) {
-    const { manager, reports } = connectionsOf(caller);
+    const { manager, reports, peers } = connectionsOf(caller);
     const wanted = String(to || '').trim().toLowerCase();
     const candidates = [
       ...(manager ? [manager.kind === 'root'
         ? { nodeId: null, name: rootInfo.displayName, ids: [ROOT, 'manager'], relation: 'manager', running: true }
         : { nodeId: manager.node.nodeId, name: manager.node.displayName, ids: [manager.node.nodeId, 'manager'], relation: 'manager', running: running(manager.node) }] : []),
       ...reports.map(node => ({ nodeId: node.nodeId, name: node.displayName, ids: [node.nodeId], relation: 'reports-to-sender', running: running(node) })),
+      ...peers.map(node => ({ nodeId: node.nodeId, name: node.displayName, ids: [node.nodeId], relation: 'linked-peer', running: running(node) })),
     ];
     const matches = candidates.filter(entry => entry.name.toLowerCase() === wanted || entry.ids.includes(wanted));
     if (matches.length > 1) throw refusal('TREE_RECIPIENT_AMBIGUOUS', `More than one circle you can reach is called "${to}". Use its agentId from agent_comms.local_roster.`);
@@ -2038,10 +2143,13 @@ function createOpenShellAgentHost({
     const body = typeof args.body === 'string' ? args.body : '';
     if (body.trim().length === 0) throw refusal('AGENT_MESSAGE_BODY_REQUIRED', 'A message body is required.');
     if (body.length > MAX_MESSAGE_CHARS) throw refusal('AGENT_MESSAGE_BODY_TOO_LONG', `A message may be at most ${MAX_MESSAGE_CHARS} characters.`);
-    if (require('./providers/sensitive-local-input').containsSensitiveMaterial(body)) {
+    if (fleetV2 ? require('./agent-comms/history').looksLikeCredential(body, require('./agent-comms/history').configuredScreening())
+      : require('./providers/sensitive-local-input').containsSensitiveMaterial(body)) {
       throw refusal('AGENT_MESSAGE_SENSITIVE_REFUSED', 'The message contains credential-like material, so it was not sent. Send only non-secret words.');
     }
     const caller = callerFromContext(context);
+    if (fleetV2 && caller.kind === 'root')
+      throw refusal('FLEET_ORCHESTRATOR_MESSAGE_REFUSED', 'Coordinate workers through durable task, rule, and ask edits.');
     let recipient;
     try {
       recipient = resolveRecipient(caller, args.to);
@@ -2049,7 +2157,7 @@ function createOpenShellAgentHost({
       // As the desktop's local route answers an unreachable recipient: an
       // answer that says who can be reached, not a failure.
       if (!/^TREE_RECIPIENT_/.test(String(error.code))) throw error;
-      const { manager, reports } = connectionsOf(caller);
+      const { manager, reports, peers } = connectionsOf(caller);
       return Object.freeze({
         accepted: false, code: error.code, reason: error.message,
         reachable: [
@@ -2086,6 +2194,7 @@ function createOpenShellAgentHost({
     }
     const asNode = { ...request, parentSessionId: node.sessionId };
     const context = { agentPrincipal: { sessionId: node.sessionId } };
+    if (op === 'fleet-control' && fleetV2 && typeof controlRequest === 'function') return controlRequest(request, node.sessionId);
     if (op === 'spawn') return addWorker(asNode);
     if (op === 'spawn-confined') return spawnConfined(asNode);
     if (op === 'command-confined') return commandConfined(asNode);
@@ -2104,6 +2213,7 @@ function createOpenShellAgentHost({
             || state.session.resolvedSandbox?.type === 'dangerFullAccess');
       });
       return Object.freeze({ nodeId: node.nodeId, sessionId: node.sessionId,
+        ...(fleetV2 ? { folderScope: node.folderScope || folderScope } : {}),
         unrestricted: mode === 'host' && unrestrictedFileRoot === true && !closing
           && permissionContext.verifiedParent === true && permissionContext.source === 'ancestor-cli'
           && rootLevel === 4 && recordedTier === 'unrestricted'
@@ -2162,10 +2272,32 @@ function createOpenShellAgentHost({
     // that startup settles, including any queued serial cleanup.
     const starting = document.nodes.filter(node => node.state === 'starting')
       .map(node => live.get(node.nodeId)?.chain).filter(Boolean);
-    const active = document.nodes.filter(node => live.get(node.nodeId)?.session || node.process);
+    const active = document.nodes.filter(node => live.get(node.nodeId)?.session || live.get(node.nodeId)?.retiringSession || node.process);
     await Promise.all(active.map(node => endSession(node, { state: 'stopped', note: 'The ToolsEnabled server holding this tree closed.' }).catch(() => {})));
     await Promise.allSettled(starting);
     save();
+  }
+
+  // Private host API: wire commands cannot grant folder authority. A changed
+  // parent policy retires every old process before the new scope is published.
+  async function updateFolderScope(next) {
+    if (!fleetV2) throw refusal('FLEET_PROFILE_REQUIRED', 'Folder transitions require fleetV2.');
+    const checked = require('./fleet-folder-scope').normalize(next);
+    if (folderTransition || folderScope && checked.revision <= folderScope.revision)
+      throw refusal('FLEET_FOLDER_REVISION_STALE', 'A newer parent folder revision is required.');
+    folderTransition = true;
+    try {
+      const affected = [...document.nodes];
+      for (const node of affected) {
+        const state = liveOf(node); state.pauseRequested = true;
+        state.controlEpoch = (state.controlEpoch || 0) + 1;
+      }
+      await Promise.all(affected.map(node => serial(node, () => pauseNode(node, { kind: 'root' }))));
+      folderScope = checked;
+      for (const node of affected) { node.folderScope = checked; node.queue = []; }
+      save();
+      return Object.freeze({ ok: true, revision: checked.revision, quiescent: true, pausedNodes: affected.map(node => node.nodeId) });
+    } finally { folderTransition = false; }
   }
 
   function list() {
@@ -2202,6 +2334,7 @@ function createOpenShellAgentHost({
     confinedTreeSpawnVersion: 1, confinedTreeLifecycleVersion: 1, spawnConfined, commandConfined,
     isTreeSession,
     command,
+    ...(fleetV2 ? { updateFolderScope } : {}),
     wait: waitForReports,
     controlDeliveryVersion: 1, controlBoundary, controls,
     resumeAssignmentVersion: 1,
@@ -2235,6 +2368,7 @@ function createOpenShellTreeClient({ socketPath, token, sessionId, ledgerContinu
   return Object.freeze({
     rootSessionId: sessionId,
     spawn: body => call('spawn', body),
+    fleetControl: body => call('fleet-control', body),
     confinedTreeSpawnVersion: 1, confinedTreeLifecycleVersion: 1,
     spawnConfined: body => call('spawn-confined', body),
     commandConfined: body => call('command-confined', body),

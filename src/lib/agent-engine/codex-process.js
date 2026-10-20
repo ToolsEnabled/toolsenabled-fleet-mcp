@@ -596,6 +596,9 @@ async function startCodexSession({
       nativeModeUnavailableReason: started.nativeModeUnavailableReason,
       resolvedSandbox: started.resolvedSandbox,
       ...(transport.processGroup ? { processGroup: transport.processGroup } : {}),
+      async quiesce() {
+        try { adapter.close(); } finally { await transport.closeForStartupFailure(cleanupTimeoutMs); }
+      },
       close() {
         if (closed) return;
         closed = true;
@@ -758,6 +761,9 @@ async function restoreCodexSession({
       model: resumed.model,
       reasoningEffort: resumed.reasoningEffort,
       ...(transport.processGroup ? { processGroup: transport.processGroup } : {}),
+      async quiesce() {
+        try { adapter.close(); } finally { await transport.closeForStartupFailure(cleanupTimeoutMs); }
+      },
       close() {
         if (closed) return;
         closed = true;

@@ -465,12 +465,16 @@ function spawnHidden(command, args = [], options = {}) {
     windowsHide,
     env,
     credentialEnvironment: statedCredentials,
-    containProcessTree = false,
+    containProcessTree: requestedContainment = false,
     processGroup = false,
     rootLaunch: privateRootLaunch,
     agentCli = false,
     ...rest
   } = options;
+  const folderScope = require('../fleet-folder-scope').current();
+  const containProcessTree = requestedContainment || Boolean(folderScope);
+  if (folderScope && process.platform === 'win32' && !require('../fleet-folder-scope').unrestricted(folderScope))
+    throw new HiddenSpawnError('FLEET_FOLDER_NATIVE_UNAVAILABLE', 'Native Windows restricted folder enforcement is not qualified; the bypass worker was not started.');
   const launchEnvironment = agentCli ? agentCliEnvironment : safeLaunchEnvironment;
 
   /* A PROVIDER SESSION IS A PROCESS TREE, NOT ONE PID.
@@ -508,6 +512,7 @@ function spawnHidden(command, args = [], options = {}) {
       shell: false,
       windowsHide: true,
       terminateDescendantsOnRootExit: true,
+      ...(folderScope ? { folderScope } : {}),
     }, { safeLaunchEnvironment: launchEnvironment, ...(beforeRootSpawn ? { beforeRootSpawn } : {}) });
     rootLaunch?.spawned(child);
     return child;

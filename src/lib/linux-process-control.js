@@ -48,7 +48,8 @@ class LinuxOwnedChild extends EventEmitter {
     const config = JSON.stringify({ version: 2, nonce, command, args, backend: BACKEND,
       cwd: path.resolve(options.cwd || process.cwd()),
       env: dependencies.safeLaunchEnvironment(options.env || process.env, { context: 'Linux owned process' }),
-      terminateDescendantsOnRootExit: options.terminateDescendantsOnRootExit === true });
+      terminateDescendantsOnRootExit: options.terminateDescendantsOnRootExit === true,
+      ...(options.folderScope ? { folderScope: require('./fleet-folder-scope').normalize(options.folderScope) } : {}) });
     if (Buffer.byteLength(config) > 4 * 1024 * 1024) throw failure('LINUX_PROCESS_INPUT_INVALID');
     // Preserve an explicitly inherited input file as a file. Node duplicates
     // the descriptor synchronously into guardian fd 4, which the native root

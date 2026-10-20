@@ -74,6 +74,7 @@ function hostWorkerEntry({ env, config, provider, socketPath, spec, tokenFile })
     env: { ...forwarded, TOOLSENABLED_RUNTIME_MODE: 'host',
       TOOLSENABLED_STATE_ROOT: path.join(config.stateRoot, 'capability'),
       TOOLSENABLED_HOST_WORKERS: '1', TOOLSENABLED_AGENT_ACTOR: provider,
+      ...(spec.fleetV2 ? { TOOLSENABLED_FLEET_PROFILE: 'fleetV2' } : {}),
       TOOLSENABLED_LEVEL_CAP: String(levels.narrowest(levels.isLevel(spec.level) ? spec.level : levels.DEFAULT_LEVEL,
         Number(narrowed.TOOLSENABLED_LEVEL_CAP), Number(env.TOOLSENABLED_LEVEL_CAP))),
       TOOLSENABLED_TOOL_ALLOWLIST: tools.join(','), TOOLSENABLED_HOST_TREE_SOCKET: socketPath,
@@ -245,7 +246,7 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
   requireEnabled(config, env);
   if (observeThreadPolicyForLaunch !== null && typeof observeThreadPolicyForLaunch !== 'function')
     throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'A private launch observer factory is required.');
-  async function start(spec, { launchObservation = null } = {}) {
+  async function startNative(spec, { launchObservation = null } = {}) {
     requireEnabled(config, env);
     if (launchObservation !== null && typeof launchObservation !== 'function')
       throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'A private launch observation function is required.');
@@ -274,12 +275,13 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
     // The worker starts at the level it inherited (the lead's, or lower), in
     // this agent's own terms. Fleet never asks for more.
     const level = levels.isLevel(spec.level) ? spec.level : levels.DEFAULT_LEVEL;
-    levels.assertWorkerLevel(agent, level, { registry: known });
-    const settings = levels.workerSettings(agent, level);
+    if (!spec.fleetV2) levels.assertWorkerLevel(agent, level, { registry: known });
+    // Approval mode is independent of MCP capability level and OS folders.
+    const settings = levels.workerSettings(agent, spec.fleetV2 ? 4 : level);
     const removals = levels.nativeRemovalSettings(agent, spec.removeNativeTools);
     common.env = require('./agents/native-removal-environment').removalEnvironment(removals, common.env, { ...spec, workerSettings: settings });
     if (driver === 'acp') {
-      const options = { ...common, provider: agent.id, level, nodeFolder: spec.nodeFolder,
+      const options = { ...common, provider: agent.id, level: spec.fleetV2 ? 4 : level, nodeFolder: spec.nodeFolder,
         removeNativeTools: levels.nativeToolRemovals(spec.removeNativeTools, ['subagents']), apiMode, fleetServer: entry, serverName: SERVER_NAME,
         threadOptions: { ...(spec.model ? { model: spec.model } : {}), ...(spec.effort ? { effort: spec.effort } : {}) } };
       const session = spec.threadId ? await resumeAcp({ ...options, threadId: spec.threadId }) : await startAcp(options);
@@ -336,6 +338,12 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
         workspaceFileTools: false } };
     const session = spec.threadId ? await resumeClaude({ ...options, threadId: spec.threadId, threadProvider: spec.provider }) : await startClaude(options);
     return Object.freeze({ ...session, apiMode, level });
+  }
+  async function start(spec, options) {
+    if (spec.fleetV2 && env.TOOLSENABLED_HOST_SETUP_KIND === 'plugin')
+      throw refusal('FLEET_PROFILE_REFUSED', 'Provider bypass workers require standalone fleetV2.');
+    if (spec.fleetV2) return require('./fleet-folder-scope').run(spec.folderScope, () => startNative(spec, options));
+    return startNative(spec, options);
   }
   return Object.freeze({ start });
 }

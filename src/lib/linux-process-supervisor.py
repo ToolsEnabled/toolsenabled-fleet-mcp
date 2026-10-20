@@ -20,6 +20,7 @@ import json
 import os
 import select
 import signal
+import stat
 import sys
 import time
 
@@ -133,6 +134,75 @@ def probe():
     return 0
 
 
+
+# Unprivileged kernel byte-access boundary, inherited across exec/fork/setsid.
+# https://docs.kernel.org/userspace-api/landlock.html
+# This does not claim to hide stat metadata or confine host-service IPC.
+def restrict_folders(scope):
+    if scope is None:
+        return
+    if not isinstance(scope, dict) or set(scope) != {"readRoots", "writeRoots", "revision", "source"}:
+        raise ValueError("invalid folder scope")
+    for key in ("readRoots", "writeRoots"):
+        if not isinstance(scope[key], list) or any(not isinstance(p, str) or not os.path.isabs(p)
+                or os.path.realpath(p) != p for p in scope[key]):
+            raise ValueError("invalid folder roots")
+    # All supported Fleet Linux targets use the generic syscall numbers.
+    if os.uname().machine not in ("x86_64", "aarch64"):
+        raise RuntimeError("Landlock architecture unsupported")
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    abi = libc.syscall(444, 0, 0, 1)
+    # REFER and TRUNCATE are mandatory: silently omitting them widens writes.
+    if abi < 3:
+        raise RuntimeError("Landlock ABI 3 required")
+    handled = (1 << 15) - 1
+    if abi >= 5:
+        handled |= 1 << 15  # ioctl on device files
+    class Ruleset(ctypes.Structure):
+        _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+    class Beneath(ctypes.Structure):
+        _pack_ = 1
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+    attr = Ruleset(handled)
+    ruleset = libc.syscall(444, ctypes.byref(attr), ctypes.sizeof(attr), 0)
+    if ruleset < 0:
+        raise OSError(ctypes.get_errno(), "Landlock create failed")
+    read = (1 << 0) | (1 << 2) | (1 << 3)
+    write = handled & ~read
+    try:
+        for key, access in (("readRoots", read), ("writeRoots", write)):
+            for root in scope[key]:
+                # Walk from a retained / descriptor, refusing every symlink.
+                # realpath-then-open alone permits a folder-swap escape.
+                fd = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    for component in root.split("/"):
+                        if not component:
+                            continue
+                        child_fd = os.open(component, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                        os.close(fd)
+                        fd = child_fd
+                    if stat.S_ISLNK(os.fstat(fd).st_mode):
+                        raise ValueError("folder root changed to an alias")
+                except BaseException:
+                    os.close(fd)
+                    raise
+                try:
+                    mask = access
+                    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                        mask &= (1 << 0) | (1 << 1) | (1 << 2) | (1 << 14) | (1 << 15)
+                    rule = Beneath(mask, fd)
+                    if libc.syscall(445, ruleset, 1, ctypes.byref(rule), 0) != 0:
+                        raise OSError(ctypes.get_errno(), "Landlock rule failed")
+                finally:
+                    os.close(fd)
+        if libc.prctl(38, 1, 0, 0, 0) != 0 or libc.syscall(446, ruleset, 0) != 0:
+            raise OSError(ctypes.get_errno(), "Landlock restrict failed")
+    finally:
+        os.close(ruleset)
+
+
 def main():
     close_inherited()
     pending = b""
@@ -154,7 +224,7 @@ def main():
         return 2
     try:
         config = json.loads(raw, object_pairs_hook=unique_object)
-        if set(config) != {"version", "nonce", "command", "args", "cwd", "env", "terminateDescendantsOnRootExit", "backend"} or config["version"] != 2:
+        if set(config) - {"folderScope"} != {"version", "nonce", "command", "args", "cwd", "env", "terminateDescendantsOnRootExit", "backend"} or config["version"] != 2:
             return 2
         if config["backend"] not in ("linux-subreaper-pidfd-v2", "linux-subreaper-waitid-v1"):
             return 2
@@ -231,6 +301,7 @@ def main():
             os.dup2(4, 0)
             os.close(4)
             os.chdir(config["cwd"])
+            restrict_folders(config.get("folderScope"))
             os.execvpe(config["command"], [config["command"], *config["args"]], config["env"])
         except BaseException:
             try:
