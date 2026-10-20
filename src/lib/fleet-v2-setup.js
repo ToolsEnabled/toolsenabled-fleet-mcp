@@ -63,7 +63,7 @@ function setup({ stateRoot, workspace, readRoots, writeRoots, readAll = false, w
   // and signs the normal machine record. It never registers a provider account.
   runtime.setupHost(config);
   const file = path.join(stateRoot, 'host-mode.json');
-  const temp = path.join(stateRoot, `.fleetV2-setup-${crypto.randomBytes(12).toString('hex')}.tmp`);
+  const temp = path.join(stateRoot, `.host-mode-${crypto.randomBytes(12).toString('hex')}.tmp`);
   const fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
   try { fs.writeFileSync(fd, JSON.stringify(config) + '\n'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   if (process.platform === 'win32') require('./windows-state-security').check('publish', file, temp);
@@ -102,7 +102,7 @@ function updateScope({ stateRoot, readRoots, writeRoots, readAll = false, revisi
     if (current.fleetV2Scope?.revision !== revision)
       refuse('FLEET_V2_REVISION_CONFLICT', 'Parent folder policy changed; inspect its current revision before editing.');
     const file = path.join(stateRoot, 'host-mode.json');
-    const temp = path.join(stateRoot, `.fleetV2-scope-${crypto.randomBytes(12).toString('hex')}.tmp`);
+    const temp = path.join(stateRoot, `.host-mode-${crypto.randomBytes(12).toString('hex')}.tmp`);
     const fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
     try { fs.writeFileSync(fd, JSON.stringify({ ...current, fleetV2Scope: next }) + '\n'); fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
