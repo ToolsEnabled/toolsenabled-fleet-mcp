@@ -11,6 +11,8 @@ const {
   validateThreadOptions
 } = require('./engine-contract');
 const { createEventBackpressure } = require('./event-backpressure');
+const { validateInputRequest, validateInputResponse } = require('./input-contract');
+const { normalizeProviderInputContext } = require('./codex-input-context');
 
 // Generated locally from codex-cli 0.146.0 with:
 //   codex app-server generate-json-schema --out <temporary directory>
@@ -38,6 +40,7 @@ const METHOD = Object.freeze({
   permissionsApproval: 'item/permissions/requestApproval',
   mcpElicitation: 'mcpServer/elicitation/request',
   toolUserInput: 'item/tool/requestUserInput',
+  serverRequestResolved: 'serverRequest/resolved',
   agentMessageDelta: 'item/agentMessage/delta',
   reasoningSummaryDelta: 'item/reasoning/summaryTextDelta',
   reasoningSummaryPart: 'item/reasoning/summaryPartAdded',
@@ -140,14 +143,15 @@ function signInRefusedText(status) {
   return `Codex's sign-in was refused (HTTP ${status}). Check "codex login status" in the environment Fleet runs in: a worker uses the Codex home (CODEX_HOME) that Fleet's server was started with.`;
 }
 /* The sentence for a failure this product has no copy for. It names the
-   provider, quotes the provider's own code (and HTTP status) when there is one,
-   and ends in the one action that fixes the cause measured above -- a sign-in
-   that a file check and `codex login status` both still call good. */
+   provider and quotes the provider's own code (and HTTP status) when there is
+   one. A 401 or 403 has its own sentence above; any other unknown code does not
+   establish a sign-in or installation cause (the Windows host line's e15f0bc),
+   so the sentence does not infer one. */
 function unrecognizedTurnFailureText(code, status = null) {
   const http = status ? ` (HTTP ${status})` : '';
   return code
-    ? `Codex ended this turn with a failure ToolsEnabled has no message for: "${code}"${http}. Check its sign-in with "codex login status", and that the Codex CLI is current.`
-    : `Codex ended this turn with a failure and named no reason ToolsEnabled could read${http}. Check its sign-in with "codex login status", and that the Codex CLI is current.`;
+    ? `Codex ended this turn with a failure ToolsEnabled has no message for: "${code}"${http}. Inspect the provider diagnostic before retrying; this code alone does not establish a sign-in or installation problem.`
+    : `Codex ended this turn with a failure and named no reason ToolsEnabled could read${http}. Inspect the provider diagnostic before retrying; this code alone does not establish a sign-in or installation problem.`;
 }
 /* The connection itself died. `this.closed.message` can quote the child's own
    stderr verbatim -- that is deliberate, it is what a developer reading a log
@@ -596,6 +600,15 @@ function parseTurnResponse(result) {
   return Object.freeze({ turnId: requiredString(turn, 'id', 'turn/start result.turn') });
 }
 
+function codexThreadOptions(options) {
+  const result = { ...validateThreadOptions(options) };
+  if (Object.hasOwn(result, 'speed')) {
+    result.serviceTier = result.speed === 'fast' ? 'fast' : 'default';
+    delete result.speed;
+  }
+  return result;
+}
+
 class CodexAdapter {
   constructor({
     transport,
@@ -603,6 +616,9 @@ class CodexAdapter {
     clientInfo = { name: 'toolsenabled', title: 'ToolsEnabled', version: '1' },
     maxBackpressureRetries = 2,
     retryDelayMs = 25,
+    requestInput = null,
+    observeThreadPolicy = null,
+    inputTimeoutMs = 120_000,
     now = Date.now
   } = {}) {
     this.transport = validateTransport(transport);
@@ -629,6 +645,15 @@ class CodexAdapter {
     this.nextRequestId = 1;
     this.pending = new Map();
     this.approvals = new Map();
+    if (requestInput !== null && typeof requestInput !== 'function') fail('CODEX_ADAPTER_INVALID', 'requestInput must be a function or null');
+    if (!Number.isSafeInteger(inputTimeoutMs) || inputTimeoutMs < 1 || inputTimeoutMs > 300_000) fail('CODEX_ADAPTER_INVALID', 'inputTimeoutMs must be bounded');
+    this.requestInput = requestInput;
+    if (observeThreadPolicy !== null && typeof observeThreadPolicy !== 'function')
+      fail('CODEX_ADAPTER_INVALID', 'observeThreadPolicy must be a private function or null');
+    this.observeThreadPolicy = observeThreadPolicy;
+    this.inputTimeoutMs = inputTimeoutMs;
+    this.inputs = new Map();
+    this.pendingServerResolutions = new Map();
     this.listeners = new Set();
     this.eventBoundary = createEventBackpressure({
       listeners: this.listeners,
@@ -732,14 +757,14 @@ class CodexAdapter {
 
   async startThread(options = {}) {
     this._assertInitialized();
-    return parseThreadResponse(await this._request(METHOD.threadStart, validateThreadOptions(options)), METHOD.threadStart);
+    return parseThreadResponse(await this._request(METHOD.threadStart, codexThreadOptions(options)), METHOD.threadStart);
   }
 
   // Bind effective config explicitly before a fresh start. config/read is
   // not a snapshot of a resumed thread and must never recover one implicitly.
   async startThreadWithNativeModeSettings(options = {}, { configTimeoutMs = 1500 } = {}) {
     this._assertInitialized();
-    const params = { ...validateThreadOptions(options) };
+    const params = { ...codexThreadOptions(options) };
     if (!Number.isInteger(configTimeoutMs) || configTimeoutMs < 1 || configTimeoutMs > 10_000) {
       fail('CODEX_ADAPTER_INVALID', 'Config read timeout must be between 1 and 10000 milliseconds');
     }
@@ -807,7 +832,7 @@ class CodexAdapter {
 
   async resumeThread(threadId, options = {}) {
     this._assertInitialized();
-    const params = { threadId: validateThreadId(threadId), ...validateThreadOptions(options) };
+    const params = { threadId: validateThreadId(threadId), ...codexThreadOptions(options) };
     const previousVersion = this.threadEstablishmentVersion;
     const { raw, result } = await this._resumeWithHistory(params);
     this._assertOpen();
@@ -819,7 +844,7 @@ class CodexAdapter {
     if (typeof sourcePath !== 'string' || sourcePath.length > 32768 || !path.isAbsolute(sourcePath) || sourcePath.includes('\0')) {
       fail('CODEX_ADAPTER_INVALID', 'Resume requires a validated absolute rollout path');
     }
-    const params = { threadId: validateThreadId(threadId), path: sourcePath, ...validateThreadOptions(options) };
+    const params = { threadId: validateThreadId(threadId), path: sourcePath, ...codexThreadOptions(options) };
     const previousVersion = this.threadEstablishmentVersion;
     const { raw, result } = await this._resumeWithHistory(params);
     this._assertOpen();
@@ -988,7 +1013,7 @@ class CodexAdapter {
 
   async forkThread(threadId, options = {}) {
     this._assertInitialized();
-    const normalized = validateThreadOptions(options);
+    const normalized = codexThreadOptions(options);
     const params = { threadId: validateThreadId(threadId), ...normalized };
     const result = parseThreadResponse(await this._request(METHOD.threadFork, params), METHOD.threadFork);
     this._assertOpen();
@@ -1004,7 +1029,7 @@ class CodexAdapter {
       fail('CODEX_ADAPTER_INVALID', 'An editor fork requires its validated absolute rollout path');
     }
     const params = { threadId: validateThreadId(threadId), path: sourcePath,
-      ...validateThreadOptions(options), deferGoalContinuation: true };
+      ...codexThreadOptions(options), deferGoalContinuation: true };
     const forked = parseThreadResponse(await this._request(METHOD.threadFork, params), METHOD.threadFork);
     this._assertOpen();
     if (forked.threadId === threadId) fail('CODEX_EDITOR_FORK_INVALID', 'Codex did not create a different conversation for this copy.');
@@ -1168,6 +1193,10 @@ class CodexAdapter {
     return Object.freeze({ models: Object.freeze(models) });
   }
 
+  speedCapabilities() {
+    return Object.freeze({ choices: Object.freeze(['standard', 'fast']) });
+  }
+
   async sendTurn(request) {
     this._assertInitialized();
     const normalized = validateSendTurnRequest(request);
@@ -1186,6 +1215,10 @@ class CodexAdapter {
     const turnOptions = {};
     for (const key of ['cwd', 'approvalPolicy', 'model', 'serviceTier']) {
       if (Object.hasOwn(normalized.options, key)) turnOptions[key] = normalized.options[key];
+    }
+    if (Object.hasOwn(normalized.options, 'speed')) {
+      // Provider wire vocabulary belongs here, not in the Fleet host.
+      turnOptions.serviceTier = normalized.options.speed === 'fast' ? 'fast' : 'default';
     }
     const params = { threadId: normalized.threadId, input, ...turnOptions };
     if (this.pendingTurnEffort.has(normalized.threadId)) {
@@ -1220,13 +1253,20 @@ class CodexAdapter {
   // https://learn.chatgpt.com/docs/app-server#steer-an-active-turn
   // Match the exact active turn; never interrupt it or create another turn.
   async steerTurn({ threadId, turnId, text }) {
-    this._assertInitialized();
-    const id = validateThreadId(threadId);
-    const expectedTurnId = validateThreadId(turnId, 'turnId');
-    const normalized = validateSendTurnRequest({ threadId: id, text });
-    const active = this.activeTurns.get(id);
-    if (!active || active.completed || active.turnId !== expectedTurnId) {
-      fail('CODEX_STEER_TURN_CHANGED', 'The receiving turn finished or changed before the message could be delivered.');
+    let id, expectedTurnId, normalized;
+    try {
+      this._assertInitialized();
+      id = validateThreadId(threadId);
+      expectedTurnId = validateThreadId(turnId, 'turnId');
+      normalized = validateSendTurnRequest({ threadId: id, text });
+      const active = this.activeTurns.get(id);
+      if (!active || active.completed || active.turnId !== expectedTurnId) {
+        fail('CODEX_STEER_TURN_CHANGED', 'The receiving turn finished or changed before the message could be delivered.');
+      }
+    } catch (error) {
+      // Nothing was sent to Codex: the caller may keep the message for a later turn.
+      if (error && typeof error === 'object') error.notSubmitted = true;
+      throw error;
     }
     const result = await this._request(METHOD.turnSteer, {
       threadId: id, expectedTurnId,
@@ -1238,7 +1278,10 @@ class CodexAdapter {
 
   async interrupt({ threadId, turnId }) {
     this._assertInitialized();
-    return this._request(METHOD.turnInterrupt, { threadId: validateThreadId(threadId), turnId: validateThreadId(turnId, 'turnId') });
+    const id = validateThreadId(threadId), turn = validateThreadId(turnId, 'turnId');
+    const active = this.activeTurns.get(id);
+    if (active?.turnId === turn) this._retireTurnInputs(active, 'interrupted', true);
+    return this._request(METHOD.turnInterrupt, { threadId: id, turnId: turn });
   }
 
   answerApproval(answer) {
@@ -1262,6 +1305,7 @@ class CodexAdapter {
       result = permissionResponse(normalized.response);
     }
     this.approvals.delete(normalized.approvalId);
+    this._rememberServerResolution(approval.rpcId, approval.active.threadId);
     this._write({ jsonrpc: '2.0', id: approval.rpcId, result });
   }
 
@@ -1296,6 +1340,31 @@ class CodexAdapter {
     if (!this.initialized) fail('CODEX_NOT_INITIALIZED', 'Codex app-server initialize must complete first');
   }
 
+  _observeThreadPolicy(phase, id, method, raw = null) {
+    if (!this.observeThreadPolicy) return;
+    if (phase !== 'closed' && ![METHOD.threadStart, METHOD.threadResume].includes(method)) return;
+    try {
+      let result;
+      if (phase === 'reply') {
+        const fields = ownRecord(raw, 'thread policy result');
+        const parsed = parseThreadResponse(raw, method);
+        const rawApproval = fields.approvalPolicy?.value;
+        const approvalPolicy = ['never', 'on-request', 'on-failure', 'untrusted'].includes(rawApproval) ? rawApproval : null;
+        const tag = parsed.resolvedSandbox?.type;
+        const sandbox = ['readOnly', 'workspaceWrite', 'dangerFullAccess'].includes(tag)
+          ? Object.freeze({ type: tag }) : null;
+        const threadId = /^[A-Za-z0-9_.-]{1,160}$/.test(parsed.threadId) ? parsed.threadId : null;
+        result = Object.freeze({ thread: Object.freeze({ id: threadId }), approvalPolicy, sandbox });
+      }
+      this.observeThreadPolicy(Object.freeze({ phase, ...(phase === 'closed' ? {} : { id, method }),
+        ...(result ? { result } : {}) }));
+    } catch {
+      // Observation failures cannot grant authority or change native replies.
+      try { this.observeThreadPolicy(Object.freeze({ phase: 'closed' })); } catch { /* no disclosure */ }
+      this.observeThreadPolicy = null;
+    }
+  }
+
   _request(method, params, attempt = 0) {
     this._assertOpen();
     if ([METHOD.threadResume, METHOD.threadFork].includes(method) && this.settingsSelections.has(params.threadId)) {
@@ -1306,9 +1375,11 @@ class CodexAdapter {
     return new Promise((resolve, reject) => {
       const id = this.nextRequestId++;
       this.pending.set(id, { method, params, attempt, resolve, reject });
+      this._observeThreadPolicy('begin', id, method);
       try {
         this._write({ jsonrpc: '2.0', id, method, params });
       } catch (error) {
+        this._observeThreadPolicy('failed', id, method);
         if (this.closed && this.pending.has(id)) return;
         this.pending.delete(id);
         reject(error);
@@ -1542,6 +1613,7 @@ class CodexAdapter {
       const code = error.code ? error.code.value : undefined;
       if (!Number.isInteger(code)) fail('CODEX_PROTOCOL_INVALID', 'Codex response error code is invalid');
       this.pending.delete(id);
+      this._observeThreadPolicy('failed', id, pending.method);
       if (code === -32001 && pending.attempt < this.maxBackpressureRetries) {
         setTimeout(() => {
           if (this.closed) pending.reject(this.closed);
@@ -1602,13 +1674,18 @@ class CodexAdapter {
         fail('CODEX_PROTOCOL_INVALID', 'Restored token usage did not match the restored Codex thread');
       }
     }
+    this._observeThreadPolicy('reply', id, pending.method, fields.result.value);
     this.pending.delete(id);
     pending.resolve(fields.result.value);
   }
 
   _handleServerRequest(fields) {
     const method = requiredString(fields, 'method', 'Codex server request');
-    if (method === METHOD.mcpElicitation || method === METHOD.toolUserInput) return this._declinePrompt(method, fields);
+    // A tool's question is declined at once (a worker has no person at its
+    // terminal). An MCP server's confirmation goes to the host's interaction
+    // route when one was given (requestInput); without one it is declined.
+    if (method === METHOD.toolUserInput) return this._declinePrompt(method, fields);
+    if (method === METHOD.mcpElicitation) return this.requestInput ? this._handleElicitation(fields) : this._declinePrompt(method, fields);
     if (![METHOD.commandApproval, METHOD.fileApproval, METHOD.permissionsApproval].includes(method)) {
       fail('CODEX_PROTOCOL_UNSUPPORTED_REQUEST', `Codex app-server requested unsupported host action ${method}`);
     }
@@ -1616,17 +1693,19 @@ class CodexAdapter {
     if ((typeof rpcId !== 'number' || !Number.isInteger(rpcId)) && typeof rpcId !== 'string') fail('CODEX_PROTOCOL_INVALID', 'Codex approval request id is invalid');
     const parsed = validateApprovalParams(method, fields.params ? fields.params.value : undefined);
     if (this.subAgentThreads.has(parsed.threadId)) {
-      this._write({ jsonrpc: '2.0', id: rpcId, error: { code: -32600, message: 'Native sub-agent approvals have no bound host turn.' } });
+      this._rememberServerResolution(rpcId, parsed.threadId);
+      if (!this.closed) this._write({ jsonrpc: '2.0', id: rpcId, error: { code: -32600, message: 'Native sub-agent approvals have no bound host turn.' } });
       return;
     }
-    if ([...this.approvals.values()].some(approval => approval.rpcId === rpcId)) {
+    if (this.inputs.has(rpcId) || [...this.approvals.values()].some(approval => approval.rpcId === rpcId)) {
       fail('CODEX_PROTOCOL_INVALID', 'Codex reused a pending approval id');
     }
     const active = this._turnEvent(parsed.threadId, parsed.turnId, method);
     if (!active) {
       // A request needs an answer even when its turn was already retired.
       // Refuse it without opening a prompt or disturbing a newer active turn.
-      this._write({ jsonrpc: '2.0', id: rpcId, error: { code: -32600, message: 'Approval request belongs to a completed Codex turn.' } });
+      this._rememberServerResolution(rpcId, parsed.threadId);
+      if (!this.closed) this._write({ jsonrpc: '2.0', id: rpcId, error: { code: -32600, message: 'Approval request belongs to a completed Codex turn.' } });
       return;
     }
     // RPC ids may be reused after a response. A delayed UI answer must never
@@ -1664,6 +1743,10 @@ class CodexAdapter {
     const turnId = params && typeof params.turnId?.value === 'string' ? params.turnId.value : null;
     const server = method === METHOD.mcpElicitation && params && typeof params.serverName?.value === 'string'
       && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(params.serverName.value) ? params.serverName.value : null;
+    // Count the answer, so the provider's later serverRequest/resolved for this
+    // id cannot dismiss a fresh request that reuses it.
+    if (threadId) this._rememberServerResolution(rpcId, threadId);
+    if (this.closed) return;
     this._write({ jsonrpc: '2.0', id: rpcId, result: method === METHOD.mcpElicitation ? { action: 'decline' } : { answers: {} } });
     if (!threadId || !turnId || this.subAgentThreads.has(threadId)) return;
     const active = this.activeTurns.get(threadId);
@@ -1673,9 +1756,161 @@ class CodexAdapter {
     declined.from.add(method === METHOD.mcpElicitation ? (server || 'an MCP server') : 'a tool');
   }
 
+  // Optional host interaction. This never treats an input request as a native
+  // permission grant. Missing UI, invalid answers and stale requests cancel;
+  // only an explicit callback may supply user-reviewed content. The callback
+  // must not block the protocol reader, which still processes interruption and
+  // serverRequest/resolved while the person is deciding.
+  _handleElicitation(fields) {
+    const rpcId = fields.id.value;
+    if (!(Number.isSafeInteger(rpcId) || typeof rpcId === 'string' && rpcId.length > 0 && rpcId.length <= 512)) {
+      this._write({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid request id.' } });
+      return;
+    }
+    if (this.inputs.has(rpcId)) {
+      this._finishInput(this.inputs.get(rpcId), { action: 'cancel', content: null }, 'duplicate');
+      return;
+    }
+    if ([...this.approvals.values()].some(approval => approval.rpcId === rpcId)) {
+      // A collision cannot safely receive a second response or borrow an
+      // existing approval. Preserve the existing approval fail-closed policy.
+      fail('CODEX_PROTOCOL_INVALID', 'Codex reused a pending approval id');
+    }
+    let data, active, request;
+    let knownThreadId = null;
+    try {
+      data = ownRecord(fields.params?.value, 'elicitation params');
+      const threadId = validateThreadId(data.threadId?.value);
+      knownThreadId = threadId;
+      const turnId = data.turnId?.value == null ? null : validateThreadId(data.turnId.value, 'turnId');
+      active = this.activeTurns.get(threadId);
+      if (!active || active.completed || this.subAgentThreads.has(threadId)
+          || turnId && this.retiredTurns.has(JSON.stringify([threadId, turnId]))
+          || active.turnId && turnId && active.turnId !== turnId || !active.turnId && !turnId) {
+        this._replyElicitation(rpcId, knownThreadId, { result: { action: 'cancel', content: null } });
+        return;
+      }
+      const kind = requiredString(data, 'mode', 'elicitation params');
+      request = validateInputRequest({
+        inputId: `input:${randomUUID()}`, threadId, turnId: turnId || active.turnId,
+        kind, sourceName: requiredString(data, 'serverName', 'elicitation params'),
+        message: requiredString(data, 'message', 'elicitation params'),
+        // Accept either provider wire spelling when present, without guessing
+        // from message prose. Conflicting fields remain unresolved context.
+        context: normalizeProviderInputContext(data._meta && data.meta ? [] : data._meta ? data._meta.value : data.meta?.value),
+        ...(kind === 'form' ? { schema: data.requestedSchema?.value } : {}),
+        ...(kind === 'url' ? { url: requiredString(data, 'url', 'elicitation params') } : {})
+      });
+      if (kind === 'url') validateThreadId(data.elicitationId?.value, 'elicitationId');
+    } catch {
+      this._replyElicitation(rpcId, knownThreadId, { error: { code: -32602, message: 'Invalid or unsupported elicitation parameters.' } });
+      return;
+    }
+    this._bindTurn(active, request.turnId, METHOD.mcpElicitation);
+    const input = { rpcId, active, request, controller: new AbortController(), timer: null };
+    if (this.inputs.size >= 32 || (active.inputCount || 0) >= 256) {
+      this._replyElicitation(rpcId, knownThreadId, { result: { action: 'cancel', content: null } });
+      return;
+    }
+    active.inputCount = (active.inputCount || 0) + 1;
+    this.inputs.set(rpcId, input);
+    if (!this.requestInput) {
+      this._finishInput(input, { action: 'cancel', content: null }, 'unavailable');
+      return;
+    }
+    input.timer = setTimeout(() => this._finishInput(input, { action: 'cancel', content: null }, 'timeout'), this.inputTimeoutMs);
+    input.timer.unref?.();
+    Promise.resolve().then(() => {
+      if (this.inputs.get(rpcId) !== input) return;
+      return this.requestInput(request, { signal: input.controller.signal });
+    }).then(answer => {
+      if (this.inputs.get(rpcId) !== input) return;
+      let result;
+      try { result = validateInputResponse(answer, request); }
+      catch { this._finishInput(input, { action: 'cancel', content: null }, 'invalid_response'); return; }
+      this._finishInput(input, result, 'answered');
+    }).catch(() => this._finishInput(input, { action: 'cancel', content: null }, 'unavailable'));
+  }
+
+  _replyElicitation(rpcId, threadId, payload) {
+    // Early cancellations/errors are answered generations too. Preserve only
+    // a validated thread identity; malformed input must not invent authority.
+    if (threadId !== null) this._rememberServerResolution(rpcId, threadId);
+    if (!this.closed) this._write({ jsonrpc: '2.0', id: rpcId, ...payload });
+  }
+
+  _rememberServerResolution(rpcId, threadId) {
+    // Responses and server cleanup notifications are separate messages. Keep
+    // an acknowledgement count for each typed RPC id + thread, so a delayed
+    // resolution for an answered generation cannot dismiss a fresh request.
+    const key = JSON.stringify([rpcId, threadId]);
+    const count = this.pendingServerResolutions.get(key) || 0;
+    if (count >= 4096 || !count && this.pendingServerResolutions.size >= 4096) {
+      this._failClosed(new CodexAdapterError('CODEX_PROTOCOL_INVALID', 'Too many unacknowledged server requests'));
+      return;
+    }
+    this.pendingServerResolutions.set(key, count + 1);
+  }
+
+  _consumeServerResolution(rpcId, threadId) {
+    const key = JSON.stringify([rpcId, threadId]);
+    const count = this.pendingServerResolutions.get(key);
+    if (!count) return false;
+    if (count === 1) this.pendingServerResolutions.delete(key);
+    else this.pendingServerResolutions.set(key, count - 1);
+    return true;
+  }
+
+  _finishInput(input, response, reason, write = true) {
+    if (this.inputs.get(input.rpcId) !== input) return;
+    this.inputs.delete(input.rpcId);
+    clearTimeout(input.timer);
+    try {
+      if (this.closed) return;
+      if (reason !== 'server_resolved') this._rememberServerResolution(input.rpcId, input.request.threadId);
+      if (this.closed) return;
+      if (write) {
+        // No user callback (including AbortSignal listeners) may run between
+        // consuming this generation and sending its correlated response.
+        try { this._write({ jsonrpc: '2.0', id: input.rpcId, result: response }); }
+        catch { return; } // _write already owns connection failure/cleanup.
+      }
+      // Never persist form answers, schema, URLs or remote message prose.
+      // Async callback/timeout settlement does not run in the wire reader;
+      // it must observe event durability failures itself.
+      try {
+        const pending = this._emit({ type: 'input_resolved', threadId: input.request.threadId, turnId: input.request.turnId,
+          payload: { inputId: input.request.inputId, kind: input.request.kind, action: response.action, reason } });
+        Promise.resolve(pending).catch(error => this._failClosed(error));
+      } catch (error) { this._failClosed(error); }
+    } finally {
+      input.controller.abort();
+    }
+  }
+
+  _retireTurnInputs(active, reason, write = false) {
+    for (const input of this.inputs.values()) if (input.active === active) {
+      this._finishInput(input, { action: 'cancel', content: null }, reason, write);
+    }
+  }
+
   _handleNotification(fields) {
     const method = requiredString(fields, 'method', 'Codex notification');
     const params = fields.params ? fields.params.value : undefined;
+    if (method === METHOD.serverRequestResolved) {
+      // Resolution is cleanup, never authority to submit an answer. Both
+      // identifiers must match so another thread cannot dismiss the prompt.
+      const data = ownRecord(params, method);
+      if (this._consumeServerResolution(data.requestId?.value, data.threadId?.value)) return;
+      const input = this.inputs.get(data.requestId?.value);
+      if (input && data.threadId?.value === input.request.threadId) {
+        this._finishInput(input, { action: 'cancel', content: null }, 'server_resolved', false);
+      }
+      for (const [id, approval] of this.approvals) {
+        if (approval.rpcId === data.requestId?.value && approval.active.threadId === data.threadId?.value) this.approvals.delete(id);
+      }
+      return;
+    }
     if ([METHOD.agentMessageDelta, METHOD.reasoningSummaryDelta, METHOD.reasoningSummaryPart, METHOD.itemStarted, METHOD.itemCompleted, METHOD.tokenUsageUpdated, METHOD.turnCompleted].includes(method)) {
       const data = ownRecord(params, method);
       const threadId = requiredString(data, 'threadId', method);
@@ -1953,8 +2188,12 @@ class CodexAdapter {
   }
 
   _retireTurnApprovals(active) {
+    this._retireTurnInputs(active, 'turn_finished');
     for (const [approvalId, approval] of this.approvals) {
-      if (approval.active === active) this.approvals.delete(approvalId);
+      if (approval.active === active) {
+        this._rememberServerResolution(approval.rpcId, active.threadId);
+        this.approvals.delete(approvalId);
+      }
     }
   }
 
@@ -1966,13 +2205,16 @@ class CodexAdapter {
   _failClosed(error, { terminateTurns = true } = {}) {
     if (this.closed) return;
     this.closed = error instanceof CodexAdapterError ? error : new CodexAdapterError('CODEX_PROTOCOL_INVALID', 'Codex protocol failed closed');
+    this._observeThreadPolicy('closed');
     const interrupted = terminateTurns
       ? [...this.activeTurns.values()].filter(active => !active.completed && typeof active.turnId === 'string')
       : [];
     if (this.unsubscribe) {
       try { this.unsubscribe(); } catch { /* Transport cleanup is best effort. */ }
     }
+    for (const input of this.inputs.values()) this._finishInput(input, { action: 'cancel', content: null }, 'closed', false);
     this.approvals.clear();
+    this.pendingServerResolutions.clear();
     let finished = false;
     const finish = async () => {
       if (finished) return;

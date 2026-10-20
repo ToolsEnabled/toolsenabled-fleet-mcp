@@ -641,6 +641,26 @@ class ClaudeCliAdapter {
       return;
     }
 
+    /* A REQUEST FROM THE CLI THAT A FLEET WORKER DOES NOT OFFER (for example a
+       permission or question callback). Fleet starts workers without any such
+       callback, so none is expected; one left unanswered would hold the turn
+       until its silence timeout. It is refused at once, grants nothing, and is
+       counted on the active turn so its report can say so. */
+    if (packet.type === 'control_request') {
+      const requestId = packet.request_id;
+      if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 512) return;
+      this.transport.send({ type: 'control_response', response: { subtype: 'error', request_id: requestId,
+        error: 'A Fleet worker does not support this request.' } });
+      const turn = this.activeTurn;
+      if (turn) {
+        const record = turn.unsupportedRequests || (turn.unsupportedRequests = { count: 0, methods: new Set() });
+        record.count += 1;
+        const subtype = packet.request && typeof packet.request.subtype === 'string' ? packet.request.subtype : '';
+        if (record.methods.size < 8) record.methods.add(/^[A-Za-z0-9_][A-Za-z0-9_./-]{0,63}$/.test(subtype) ? subtype : 'an unnamed request');
+      }
+      return;
+    }
+
     if (packet.type === 'system' && ['init', 'status'].includes(packet.subtype)
         && packet.session_id === this.threadId && typeof packet.permissionMode === 'string') {
       const mode = packet.permissionMode === 'manual' ? 'default' : packet.permissionMode;
@@ -893,11 +913,14 @@ class ClaudeCliAdapter {
           ? [{ tool, path: file }] : [];
       }).slice(0, 4)
       : [];
+    const unsupported = turn && turn.turnId === base.turnId && turn.unsupportedRequests
+      ? { count: turn.unsupportedRequests.count, methods: [...turn.unsupportedRequests.methods] } : null;
     this.emit({ type: 'turn_completed', ...base, status, ...(failureText ? { text: failureText } : {}),
-      ...(retainedFailure || permissionDenied ? { payload: {
+      ...(retainedFailure || permissionDenied || unsupported ? { payload: {
         ...(retainedFailure ? { code: retainedFailure.code } : {}),
         ...(permissionDenied ? { permissionDenied: true, permissionDeniedTools,
-          ...(permissionDeniedFiles.length ? { permissionDeniedFiles } : {}) } : {})
+          ...(permissionDeniedFiles.length ? { permissionDeniedFiles } : {}) } : {}),
+        ...(unsupported ? { unsupportedRequests: unsupported } : {})
       } } : {}) });
 
     if (!turn || this.activeTurn !== turn) return;

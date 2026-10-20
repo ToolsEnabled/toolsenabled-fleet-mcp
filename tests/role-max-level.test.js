@@ -84,7 +84,9 @@ test('workers inherit the union of native removals along the entire tree on star
       removeNativeTools: id => id === 'controller' ? ['web'] : id === 'manager' ? ['shell'] : [],
       admitChild: ({ childRoleId, parentSurface }) => ({ roleId: childRoleId, surface: parentSurface }), brief: ({ task }) => task },
     launcher: { async start(spec) { launches.push(spec); return { threadId: 'thread-' + launches.length,
-      adapter: { async sendTurn() { return { text: 'done' }; }, async interrupt() {} }, close() {} }; } }
+      // The stand-in names its accepted turn, as the real adapters do: the tree
+      // binds turn events to it (Windows host line 5e38468).
+      adapter: { async sendTurn() { return { turnId: 'turn-' + launches.length, text: 'done' }; }, async interrupt() {} }, close() {} }; } }
   });
   t.after(() => host.closeAll());
   const parent = await host.spawn({ parentSessionId: 'lead', tier: 'luna', role: 'manager', brief: 'Read state.' });

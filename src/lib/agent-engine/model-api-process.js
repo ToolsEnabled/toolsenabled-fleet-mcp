@@ -11,7 +11,10 @@ const { createModelApiTransport } = require('./model-api-transport');
 const { validateConnection, assertHostConnectionAuthority } = require('../openshell-model-connections');
 const { readOpenShellPlaceholder } = require('../openshell-placeholder');
 const { OPENSHELL_TOOLS, OPENSHELL_AGENT_TOOLS } = require('../openshell-surface');
-const REVIEWED = new Set([...OPENSHELL_TOOLS, ...OPENSHELL_AGENT_TOOLS]);
+// The host tree also offers agent.continue; a model worker whose role grants it
+// is started like any other worker (found by the per-provider review of the
+// Windows host line's a76b012).
+const REVIEWED = new Set([...OPENSHELL_TOOLS, ...OPENSHELL_AGENT_TOOLS, ...require('../host-surface').hostAllowlist({ workers: true })]);
 const LEVELS = require('../agents/permission-level');
 const TOOL_ENV = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'TMP', 'TEMP',
   'LANG', 'LC_ALL', 'SYSTEMROOT', 'SystemRoot', 'COMSPEC', 'PATHEXT',

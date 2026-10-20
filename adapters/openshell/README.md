@@ -4,7 +4,7 @@ ToolsEnabled Fleet's engine is an MCP server. This folder runs it inside your ow
 [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox, next to the
 agent CLIs you install and sign in yourself.
 
-For Gemini CLI, use your own Gemini API key, Vertex AI, or a Gemini Code Assist Standard or Enterprise sign-in in `gemini`. Google ended Login with Google for individual plans in Gemini CLI on 2026-06-18.
+For Fleet workers, use your own Gemini API key, Vertex AI, or an assigned Gemini Code Assist Standard or Enterprise license through the official `gemini` CLI. Personal Antigravity accounts are not supported as Fleet workers. Sign in through the CLI itself; never copy or replay OAuth credentials.
 
 Fleet asks each lead to pass its profile folders to Fleet so workers use the same profiles. Codex and Gemini CLI do not pass API keys or tokens to MCP servers unless you allow them. To let workers use a key from your environment, run `toolsenabled setup --add --pass-env NAME[,NAME...]`. Fleet records names only; the agent forwards values at runtime. Setup keeps the recorded names on reruns; `--pass-env ""` clears them. `toolsenabled status` shows the names.
 

@@ -29,6 +29,15 @@ const STDERR_LIMIT = 64 * 1024;
 const VERSION_OUTPUT_LIMIT = 1024 * 1024;
 const DEFAULT_VERSION_TIMEOUT_MS = 10_000;
 const DEFAULT_START_TIMEOUT_MS = 60_000;
+function configuredStartupTimeout(env = process.env) {
+  const value = env.TOOLSENABLED_CODEX_START_TIMEOUT_MS;
+  if (value === undefined || value === '') return DEFAULT_START_TIMEOUT_MS;
+  if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1000 || Number(value) > 600_000) {
+    throw Object.assign(new Error('TOOLSENABLED_CODEX_START_TIMEOUT_MS must be an integer from 1000 through 600000 milliseconds.'),
+      { code: 'CODEX_START_TIMEOUT_INVALID' });
+  }
+  return Number(value);
+}
 
 function validateInvocation(command, args) {
   if (typeof command !== 'string' || command.length === 0 || command.length > 32_768) {
@@ -535,6 +544,8 @@ async function startCodexSession({
   clientInfo,
   threadOptions = {},
   onEvent = null,
+  requestInput = null,
+  observeThreadPolicy = null,
   command = 'codex',
   provider = 'codex',
   args = ['app-server'],
@@ -542,7 +553,7 @@ async function startCodexSession({
   rootLaunch,
   signal = null,
   beforeThread = null,
-  startupTimeoutMs = DEFAULT_START_TIMEOUT_MS,
+  startupTimeoutMs = configuredStartupTimeout(env),
   cleanupTimeoutMs = DEFAULT_CLEANUP_TIMEOUT_MS,
   // See createCodexProcessTransport: false only for the OpenShell agent tree.
   containProcessTree = true,
@@ -568,7 +579,7 @@ async function startCodexSession({
       ...(containProcessTree === false ? { containProcessTree: false } : {}),
       ...(processGroup ? { processGroup: true } : {}),
       ...(credentialEnvironment ? { credentialEnvironment } : {}) });
-    adapter = new CodexAdapter({ transport, codexVersion, clientInfo });
+    adapter = new CodexAdapter({ transport, codexVersion, clientInfo, requestInput, observeThreadPolicy });
     if (onEvent) adapter.onEvent(onEvent);
     if (rootLaunch) await startup.wait(() => transport.rootReady);
     await startup.wait(() => adapter.initialize())
@@ -623,6 +634,8 @@ async function restoreCodexSession({
   clientInfo,
   threadOptions = {},
   onEvent = null,
+  requestInput = null,
+  observeThreadPolicy = null,
   command = 'codex',
   provider = 'codex',
   args = ['app-server'],
@@ -630,7 +643,7 @@ async function restoreCodexSession({
   rootLaunch,
   signal = null,
   beforeThread = null,
-  startupTimeoutMs = DEFAULT_START_TIMEOUT_MS,
+  startupTimeoutMs = configuredStartupTimeout(env),
   cleanupTimeoutMs = DEFAULT_CLEANUP_TIMEOUT_MS,
   /* THE PROVIDER THAT MINTED THIS THREAD, when the record has one. Absent means
      a thread from before 1.0.42 recorded it, which is permitted -- see
@@ -713,7 +726,7 @@ async function restoreCodexSession({
       ...(containProcessTree === false ? { containProcessTree: false } : {}),
       ...(processGroup ? { processGroup: true } : {}),
       ...(credentialEnvironment ? { credentialEnvironment } : {}) });
-    adapter = new CodexAdapter({ transport, codexVersion, clientInfo });
+    adapter = new CodexAdapter({ transport, codexVersion, clientInfo, requestInput, observeThreadPolicy });
     if (onEvent) adapter.onEvent(onEvent);
     if (rootLaunch) await startup.wait(() => transport.rootReady);
     await startup.wait(() => adapter.initialize())
@@ -773,6 +786,7 @@ async function forkCodexSession(options = {}) {
 }
 
 module.exports = {
+  configuredStartupTimeout,
   RESUME_SOURCE_CONTRACT_VERSION: 2,
   ROOT_ADMISSION_CONTRACT_VERSION: 1,
   createCodexProcessTransport,

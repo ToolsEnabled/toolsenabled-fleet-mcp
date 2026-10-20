@@ -9,9 +9,10 @@ const path = require('node:path');
 // Override the installed host entry in this worker process. A second name
 // would leave the root registration active beside the narrower worker server.
 const SERVER_NAME = 'toolsenabled-fleet-host';
-const APPROVAL_DENIED = 'A native permission request was denied because host workers cannot present approval prompts. Run the needed action through your own CLI session.';
+const APPROVAL_DENIED = 'Fleet could not present this native permission request and refused it; no human rejected it. Review the needed action in your own CLI session. Fleet added no permission grants.';
 const MODES = ['Only', 'Optimized', 'Enabled', 'Disabled'];
 const SERVER_ENV = ['HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_DATA_HOME', 'LOCALAPPDATA',
+  'TOOLSENABLED_CODEX_START_TIMEOUT_MS',
   'SSL_CERT_FILE', 'NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'GIT_SSL_CAINFO',
   'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'no_proxy'];
 const TREE_ENV = ['TOOLSENABLED_OPENSHELL_ROLE', 'TOOLSENABLED_OPENSHELL_DIRECT_ONLY', 'TOOLSENABLED_TOOL_ALLOWLIST', 'TOOLSENABLED_LEVEL_CAP'];
@@ -126,7 +127,7 @@ function codexOverrides(entry, apiMode, names = require('./agents/registration')
   return args;
 }
 
-function codexEvents(onEvent) {
+function codexEvents(onEvent, identity = {}) {
   let session;
   const deniedTurns = new Map();
   const assistantText = new Map();
@@ -134,9 +135,26 @@ function codexEvents(onEvent) {
   return {
     bind(value) { session = value; },
     onEvent(event) {
+      if (event?.type === 'interaction_required') {
+        deniedTurns.set(event.turnId, event.payload?.state === 'pending'
+          ? 'This turn needs a human response through the Fleet interactions terminal. Fleet has supplied no answer or new permissions.'
+          : 'Fleet could not hand off this interaction (' + event.payload?.reason + '); no human rejected it. Review the request in your own session.');
+      }
+      if (event?.type === 'interaction_resolved') {
+        if (event.payload?.state === 'answered') deniedTurns.delete(event.turnId);
+        else deniedTurns.set(event.turnId, 'The pending interaction was cancelled (' + event.payload?.reason
+          + '). This does not imply a human rejected it. Fleet added no permission grants.');
+      }
+      if (event?.type === 'input_resolved' && event.payload?.reason === 'unavailable') {
+        deniedTurns.set(event.turnId, 'An input request was cancelled because this worker cannot present user interaction. Review the request in your own agent session; Fleet supplied no answers or new permissions.');
+        return;
+      }
       if (event?.type === 'approval_request') {
         const approval = event.approval;
         deniedTurns.set(event.turnId, APPROVAL_DENIED);
+        forward({ type: 'interaction_required', threadId: event.threadId, turnId: event.turnId,
+          payload: { ...identity, interactionId: approval?.approvalId || null, kind: 'native-approval',
+            sourceName: 'provider-native', state: 'unavailable', reason: 'native_approval_human_route_unavailable', requiresUserDecision: true, responseAuthority: 'same-owner-interactive-terminal' } });
         try {
           if (!approval || !['commandExecution', 'fileChange', 'permissions'].includes(approval.kind)
               || !session?.adapter?.answerApproval) throw refusal('HOST_APPROVAL_UNAVAILABLE', APPROVAL_DENIED);
@@ -203,7 +221,8 @@ function assertSandboxNotWider(session, settings, level) {
   }
 }
 
-function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, socketPath,
+function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, socketPath, interactionBroker = null,
+  observeThreadPolicyForLaunch = null,
   startCodex = options => require('./agent-engine/codex-process').startCodexSession(options),
   resumeCodex = options => require('./agent-engine/codex-process').resumeCodexSession(options),
   startClaude = options => require('./agent-engine/claude-cli-process').startClaudeSession(options),
@@ -216,8 +235,12 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
   agentApiMode = () => require('./agent-api-policy').agentApiMode({ env }),
 } = {}) {
   requireEnabled(config, env);
-  async function start(spec) {
+  if (observeThreadPolicyForLaunch !== null && typeof observeThreadPolicyForLaunch !== 'function')
+    throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'A private launch observer factory is required.');
+  async function start(spec, { launchObservation = null } = {}) {
     requireEnabled(config, env);
+    if (launchObservation !== null && typeof launchObservation !== 'function')
+      throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'A private launch observation function is required.');
     const agents = require('./agents/registry');
     const known = agents.activeRegistry(env);
     agents.assertWorkerAvailable(known, spec.provider);
@@ -255,14 +278,22 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
       return Object.freeze({ ...session, apiMode, level, turnCompletion: 'event' });
     }
     if (driver === 'app-server') {
-      const events = codexEvents(spec.onEvent);
+      const identity = { nodeId: spec.nodeId, sessionId: spec.sessionId, parentSessionId: spec.parentSessionId || null };
+      const observeThreadPolicy = launchObservation || (observeThreadPolicyForLaunch ? observeThreadPolicyForLaunch(spec) : null);
+      if (observeThreadPolicy !== null && typeof observeThreadPolicy !== 'function')
+        throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'The private launch observer is unavailable.');
+      const events = codexEvents(spec.onEvent, identity);
       // The worker keeps the person's own MCP servers, as the lead does; the
       // person's registration of Fleet is replaced by the worker's own server,
       // so the worker never acts as the lead.
       const forwarding = require('./agents/registration');
       const names = forwarding.forwardEnvNames(forwarding.recordedPassEnv({ servicesRoot: path.join(config.stateRoot, 'services'), env }), known);
       const overrides = codexOverrides(entry, apiMode, names);
-      const options = { ...common, onEvent: events.onEvent, clientInfo: { name: 'toolsenabled-fleet', title: 'ToolsEnabled Fleet', version: '1' },
+      const options = { ...common, onEvent: events.onEvent,
+        ...(observeThreadPolicy ? { observeThreadPolicy } : {}),
+        ...(interactionBroker ? { requestInput: (request, context) => interactionBroker.request(
+          { ...identity, level }, request, { ...context, onEvent: events.onEvent }) } : {}),
+        clientInfo: { name: 'toolsenabled-fleet', title: 'ToolsEnabled Fleet', version: '1' },
         command: agent.command, provider: agent.id,
         args: ['app-server', ...overrides, ...Object.entries(removals.overrides).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`])],
         threadOptions: {

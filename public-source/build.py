@@ -75,7 +75,8 @@ def verify_archive(archive_path, commit, runtime, blobs, edition, version):
                     *(base + 'payload/engine/' + name for name in runtime),
                     *(base + name for name in helpers)}
         if edition == 'host':
-            expected.update({base + 'toolsenabled', base + 'host_install.py', base + 'host_registration.py'})
+            expected.update({base + 'toolsenabled', base + 'host_install.py', base + 'host_registration.py',
+                             base + 'handoff_preflight.py', base + 'owner_handoff.py'})
         else:
             expected.add(base + 'README.md')
             expected.update(base + 'payload/engine/libexec/' + name for name in helpers)
@@ -100,7 +101,7 @@ def verify_archive(archive_path, commit, runtime, blobs, edition, version):
         prefix = 'installer/host/' if edition == 'host' else 'installer/openshell/'
         compared_helpers = ['install.sh', *helpers]
         if edition == 'host':
-            compared_helpers += ['host_install.py', 'host_registration.py']
+            compared_helpers += ['host_install.py', 'host_registration.py', 'handoff_preflight.py', 'owner_handoff.py']
         for name in compared_helpers:
             source = 'installer/openshell/fleet_fs.py' if edition == 'host' and name == 'fleet_fs.py' else prefix + name
             if content(base + name) != blobs[source][0]:

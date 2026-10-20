@@ -133,17 +133,23 @@ function requiredNumber(fields, key, label, { integer = false, min = -Number.MAX
   return value;
 }
 
-function jsonData(value, label, depth = 0) {
+// An oversized array refuses, unless the caller passes `trim`: then it keeps the
+// first entries, marks trim.trimmed, and validates the rest exactly as before.
+function jsonData(value, label, depth = 0, trim = null) {
   if (depth > 32) fail('ACP_PROTOCOL_INVALID', `${label} is too deeply nested`);
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (Array.isArray(value)) {
-    if (value.length > 10_000) fail('ACP_PROTOCOL_INVALID', `${label} has too many entries`);
-    return value.map((entry, index) => jsonData(entry, `${label}[${index}]`, depth + 1));
+    if (value.length > 10_000) {
+      if (!trim) fail('ACP_PROTOCOL_INVALID', `${label} has too many entries`);
+      trim.trimmed = true;
+      value = value.slice(0, 10_000);
+    }
+    return value.map((entry, index) => jsonData(entry, `${label}[${index}]`, depth + 1, trim));
   }
   const fields = ownRecord(value, label);
   const copy = {};
-  for (const [key, descriptor] of Object.entries(fields)) copy[key] = jsonData(descriptor.value, `${label}.${key}`, depth + 1);
+  for (const [key, descriptor] of Object.entries(fields)) copy[key] = jsonData(descriptor.value, `${label}.${key}`, depth + 1, trim);
   return copy;
 }
 
@@ -693,14 +699,14 @@ class AcpAdapter {
           itemId: active.assistantItemId, text: active.assistantParts.join('')
         });
       }
-      this._emit({ type: 'turn_completed', threadId: normalized.threadId, turnId, status: stopReason });
+      this._emit({ type: 'turn_completed', threadId: normalized.threadId, turnId, status: stopReason, ...this._unsupportedPayload(active) });
       return Object.freeze({ turnId, stopReason });
     } catch (error) {
       // Failed prompts still have a report boundary, including any permissions
       // denied before the agent failed. The rejection also lets the tree end
       // a session whose transport or protocol has closed.
       this._emit({ type: 'turn_completed', threadId: normalized.threadId, turnId,
-        status: 'failed', text: error.message });
+        status: 'failed', text: error.message, ...this._unsupportedPayload(active) });
       throw error;
     } finally {
       active.settled = true;
@@ -1108,7 +1114,12 @@ class AcpAdapter {
       fail('ACP_PROTOCOL_INVALID', 'ACP response id is invalid');
     }
     const pending = this.pending.get(id);
-    if (!pending) fail('ACP_PROTOCOL_INVALID', 'ACP response did not match a pending request');
+    // A peer may send responses for its own internal work, or repeat an
+    // already answered response. Neither owns a client request. Discard it
+    // without replying, retaining it for a future id, or touching any turn.
+    // Exact typed-id lookup keeps every response we requested on the strict
+    // validation path below.
+    if (!pending) return;
     if (Object.hasOwn(fields, 'error')) {
       // Retain the request until error validation succeeds. A malformed
       // response closes the reader and must reject this promise with the rest.
@@ -1138,9 +1149,7 @@ class AcpAdapter {
 
   _handleAgentRequest(fields) {
     const method = requiredString(fields, 'method', 'ACP agent request', { max: 512 });
-    if (method !== METHOD.sessionRequestPermission) {
-      fail('ACP_PROTOCOL_UNSUPPORTED_REQUEST', `ACP agent requested unsupported host action ${method}`);
-    }
+    if (method !== METHOD.sessionRequestPermission) return this._answerUnsupportedRequest(method, fields);
     const rpcId = fields.id.value;
     if (!((typeof rpcId === 'number' && Number.isSafeInteger(rpcId)) ||
       (typeof rpcId === 'string' && rpcId.length > 0 && rpcId.length <= 512))) {
@@ -1176,6 +1185,37 @@ class AcpAdapter {
     });
   }
 
+  /* A REQUEST THIS CLIENT DOES NOT OFFER. Fleet advertises no client
+     capabilities, so a conforming agent asks only for permission. Any other
+     request (an extension, a question, a file or terminal request) used to fail
+     the whole protocol, which ended the worker. It is answered as JSON-RPC
+     "method not found" instead, grants nothing, and is counted on the active
+     turn so its report can say so (method names only, bounded). */
+  _answerUnsupportedRequest(method, fields) {
+    const rpcId = fields.id.value;
+    if (!((typeof rpcId === 'number' && Number.isSafeInteger(rpcId)) ||
+      (typeof rpcId === 'string' && rpcId.length > 0 && rpcId.length <= 512))) {
+      fail('ACP_PROTOCOL_INVALID', 'ACP agent request id is invalid');
+    }
+    if (this.pendingApprovalRequests.has(rpcId)) fail('ACP_PROTOCOL_INVALID', 'ACP reused a pending request id');
+    this._write({ jsonrpc: '2.0', id: rpcId, error: { code: -32601, message: 'Method not found' } });
+    let sessionId = null;
+    try {
+      const params = Object.hasOwn(fields, 'params') ? fields.params.value : undefined;
+      if (params && typeof params === 'object' && !Array.isArray(params) && typeof params.sessionId === 'string') sessionId = params.sessionId;
+    } catch { sessionId = null; }
+    const active = sessionId === null ? null : this.activeTurns.get(sessionId);
+    if (!active || active.settled) return;
+    const record = active.unsupportedRequests || (active.unsupportedRequests = { count: 0, methods: new Set() });
+    record.count += 1;
+    if (record.methods.size < 8) record.methods.add(/^[A-Za-z0-9_][A-Za-z0-9_./-]{0,63}$/.test(method) ? method : 'an unnamed method');
+  }
+
+  _unsupportedPayload(active) {
+    const record = active.unsupportedRequests;
+    return record ? { payload: { unsupportedRequests: { count: record.count, methods: [...record.methods] } } } : {};
+  }
+
   _handleNotification(fields) {
     const method = requiredString(fields, 'method', 'ACP notification', { max: 512 });
     if (method !== METHOD.sessionUpdate) return;
@@ -1192,6 +1232,15 @@ class AcpAdapter {
     const update = ownRecord(value, 'session/update update');
     if (Object.hasOwn(update, '_meta')) jsonData(update._meta.value, 'session/update update._meta');
     const kind = requiredString(update, 'sessionUpdate', 'session/update update', { max: 256 });
+    /* A NATIVE SUB-AGENT'S OWN SESSION. An agent that keeps its sub-agents
+       (its descriptor names no way to remove them) streams each child's
+       thinking, text and tool calls over this connection, under the session
+       id the child opened. Fleet never opened that session and has no prompt
+       there, so the strict checks below ended the parent worker mid-task.
+       Those updates are not this worker's output and are dropped. A child's
+       permission request is still declined by _handleAgentRequest, and every
+       session Fleet opened keeps the checks below. */
+    if (!this.sessionIdentities.has(sessionId) && !this.loadingSessions.has(sessionId)) return;
     const active = this.activeTurns.get(sessionId);
     if (kind === 'config_option_update') {
       const options = normalizeSessionConfigOptions(update.configOptions?.value, 'config_option_update.configOptions');
@@ -1324,10 +1373,16 @@ class AcpAdapter {
   }
 
   _toolUpdatePayload(fields) {
-    const payload = {};
+    // A tool's output is display data the agent has already acted on, so a long one
+    // is trimmed and marked instead of ending the session. Everything else here, and
+    // every permission request, keeps the strict bound.
+    const payload = {}, trim = { trimmed: false };
     for (const key of ['title', 'kind', 'status', 'rawInput', 'rawOutput', 'content', 'locations']) {
-      if (Object.hasOwn(fields, key)) payload[key] = jsonData(fields[key].value, `tool update.${key}`);
+      if (Object.hasOwn(fields, key)) {
+        payload[key] = jsonData(fields[key].value, `tool update.${key}`, 0, key === 'rawOutput' || key === 'content' ? trim : null);
+      }
     }
+    if (trim.trimmed) payload.truncated = true;
     return payload;
   }
 

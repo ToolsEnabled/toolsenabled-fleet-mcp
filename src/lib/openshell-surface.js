@@ -53,7 +53,7 @@ const OPENSHELL_TOOLS = Object.freeze([
 // agent.set_account is not offered: a sandbox has one sign-in per CLI.
 const OPENSHELL_AGENT_TOOLS = Object.freeze([
   'agent.spawn', 'agent.wait', 'agent.stop', 'agent.restart', 'agent.remove', 'agent.resume',
-  'agent.set_model', 'agent.set_effort', 'agent.set_provider', 'agent.set_role',
+  'agent.set_model', 'agent.set_effort', 'agent.set_speed', 'agent.set_provider', 'agent.set_role',
   'agent_comms.send_local', 'agent_comms.local_roster',
 ]);
 

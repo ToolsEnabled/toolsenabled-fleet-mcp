@@ -1,0 +1,14 @@
+{
+  "source": "Grok 1.0.60 ACP capture, isolated skill refresh during native subagent task, 2026-10-19",
+  "responses": [
+    {
+      "jsonrpc": "2.0",
+      "id": "skills-reload",
+      "result": {
+        "result": {
+          "reloaded": 1
+        }
+      }
+    }
+  ]
+}

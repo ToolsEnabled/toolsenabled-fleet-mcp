@@ -44,9 +44,11 @@ function lastTurn(value) {
 
 function workerState(node, live) {
   if (node.state === 'failed' || node.lastTurn?.status === 'failed') return 'failed';
+  if ((!live || node.state === 'stopped') && node.continuation && !['done', 'disabled'].includes(node.continuation.state)) return 'waiting';
   if (!live || node.state === 'stopped') return 'done';
   if (node.waitingForApproval === true && node.turn === 'running') return 'waiting';
   if (node.state === 'starting' || node.turn === 'running') return 'running';
+  if (node.continuation && !['done', 'disabled'].includes(node.continuation.state)) return 'waiting';
   if (node.lastTurn) return 'done';
   return 'idle';
 }
@@ -78,6 +80,14 @@ function projectTree(tree) {
       effort: safe(node.effort, EFFORT, null), treeRole: safe(node.role, ROLE, null),
       expectedSessionId: safe(node.sessionId, SESSION, null), pending: pending(node.pending),
       waitingForApproval: node.waitingForApproval === true,
+      ...(node.continuation ? { continuation: {
+        state: ['ready', 'running', 'waiting', 'paused', 'done', 'disabled'].includes(node.continuation.state) ? node.continuation.state : 'unknown',
+        reason: safe(node.continuation.reason, /^[a-z][a-z-]{0,60}$/, null),
+        taskCount: Array.isArray(node.continuation.taskIds) ? Math.min(node.continuation.taskIds.length, 100) : 0,
+        turns: Number.isSafeInteger(node.continuation.turns) && node.continuation.turns >= 0 ? node.continuation.turns : null,
+        maxTurns: Number.isSafeInteger(node.continuation.maxTurns) && node.continuation.maxTurns >= 1 ? node.continuation.maxTurns : null,
+        automaticRestart: false,
+      } } : {}),
       role: 'worker', state: workerState(node, live),
       // The permission level this worker last started at (1-4), or null.
       level: [1, 2, 3, 4].includes(node.level) ? node.level : null,

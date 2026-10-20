@@ -190,6 +190,9 @@ async function machineView(options = {}) {
       modelEndpoints: endpoints.entries, modelEndpointsState: endpoints.state },
     sandbox: await sandboxStatus(mode),
     mcp: { connected: null, reason: 'A separate CLI read cannot observe the lead client connection.', revisions: require('./mcp-revisions').snapshot({ root }) },
+    continuation: { supported: mode === 'host', enrollment: 'agent.continue with exact assigned owner T-ledger IDs',
+      automaticRestart: false, globalBacklogPickup: false, clientRootWake: false,
+      note: 'The setting alone starts no work. Inspect worker continuation state and reason in the tree or local roster.' },
     agents: { enabled: mode === 'host' ? Boolean(options.hostConfig.workers)
       : allowlist ? allowlist.split(',').includes('agent.spawn') : null,
       reason: mode === 'host' || allowlist ? null : 'The CLI did not inherit the MCP tool allowlist.' },

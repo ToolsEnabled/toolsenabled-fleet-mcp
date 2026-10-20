@@ -1,8 +1,8 @@
 # ToolsEnabled Fleet host mode
 
-Host mode adds an explicit Linux x86_64 / WSL 2 entry for people who already use an agent CLI. It uses the same Fleet MCP broker, durable task and memory stores, inherited permission levels, and byte-mediated file tools as the OpenShell edition. Host mode is included in Fleet 1.9.0, published on [toolsenabled.ai](https://toolsenabled.ai). Consult the release for its exact archive and real CLI qualification results.
+Host mode adds an explicit Linux x86_64 / WSL 2 entry for people who already use an agent CLI. It uses the same Fleet MCP broker, durable task and memory stores, inherited permission levels, and byte-mediated file tools as the OpenShell edition. Host mode is included in Fleet 1.9.1, published on [toolsenabled.ai](https://toolsenabled.ai). Consult the release for its exact archive and real CLI qualification results.
 
-For Gemini CLI, use your own Gemini API key, Vertex AI, or a Gemini Code Assist Standard or Enterprise sign-in in `gemini`. Google ended Login with Google for individual plans in Gemini CLI on 2026-06-18.
+For Fleet workers, use your own Gemini API key, Vertex AI, or an assigned Gemini Code Assist Standard or Enterprise license through the official `gemini` CLI. Personal Antigravity accounts are not supported as Fleet workers. Sign in through the CLI itself; never copy or replay OAuth credentials.
 
 ## Boundaries and defaults
 
@@ -27,11 +27,11 @@ Worker tree records remain under the configured state directory. Unix worker soc
 
 ## Download, verify, and install
 
-Obtain the reviewed `toolsenabled-host-1.9.0-linux-x64.tar.gz` for 1.9.0 and its SHA-256 from the release channel. Verify the checksum using an independently obtained release digest before extracting or executing any package code. `SHA256SUMS` fetched alongside an archive detects corruption; authenticate the expected digest through the release channel too.
+Obtain the reviewed `toolsenabled-host-1.9.1-linux-x64.tar.gz` for 1.9.1 and its SHA-256 from the release channel. Verify the checksum using an independently obtained release digest before extracting or executing any package code. `SHA256SUMS` fetched alongside an archive detects corruption; authenticate the expected digest through the release channel too.
 
 ```bash
 # Replace both values with the chosen release's absolute path and digest.
-archive=/absolute/path/toolsenabled-host-1.9.0-linux-x64.tar.gz
+archive=/absolute/path/toolsenabled-host-1.9.1-linux-x64.tar.gz
 release_sha256=REPLACE_WITH_APPROVED_64_CHARACTER_SHA256
 printf '%s  %s\n' "$release_sha256" "$archive" | sha256sum -c -
 umask 077
@@ -103,10 +103,105 @@ Use the exact name in your worker's report and restart or resume the worker afte
 
 ## Windows agents through WSL
 
-Host mode runs inside a WSL 2 distribution. A Windows agent can use it by starting Fleet through `wsl.exe` in its MCP entry (`setup --print-server-json` inside WSL prints the Linux command to wrap). Two things differ from a lead that runs inside WSL:
+Fleet runs inside WSL 2. Install Node 22.19.0 or newer and Python 3.11 or newer
+there. Keep Fleet, its state and worker CLI profiles on the Linux filesystem.
+Replace `USER`, the distribution name and executable/package paths below with
+those on your machine; use `command -v node` inside WSL to find the Node path.
+The examples assume `/usr/local/bin/node`.
 
-- Fleet reads a lead's permission level from the lead's own command line, and a Windows process is not visible from inside WSL. Such a lead counts as level 2: workers decline anything that would ask.
-- Workers sign in from the agent profile Fleet's server sees. To use the Windows Codex profile, name it in the entry's environment, for example `CODEX_HOME=/mnt/c/Users/NAME/.codex`, and give Codex a Linux folder for its database with `CODEX_SQLITE_HOME`. Fleet forwards both to Codex workers and their own Fleet servers. Fleet never copies a sign-in.
+For the Codex coordination-only package, run this inside the installed folder
+in WSL, with an existing project directory:
+
+```sh
+node bin/toolsenabled-host.js setup --plugin --tier standard \
+  --workspace /home/USER/work --state-root /home/USER/.toolsenabled-fleet-mcp
+```
+
+Native Windows Codex, `%USERPROFILE%\.codex\config.toml`:
+
+```toml
+[mcp_servers.fleet]
+command = 'C:\Windows\System32\wsl.exe'
+args = ["-d", "Ubuntu-24.04", "--cd", "/home/USER/work", "--", "env", "FLEET_MCP_CODEX_STATE_ROOT=/home/USER/.toolsenabled-fleet-mcp", "FLEET_MCP_CODEX_WORKSPACE=/home/USER/work", "/usr/local/bin/node", "/home/USER/.local/share/toolsenabled-fleet-mcp/codex-entry.js"]
+startup_timeout_sec = 60
+```
+
+Native Windows Claude Code, in Windows PowerShell 5.1:
+
+```powershell
+claude.cmd mcp add --scope user fleet "--" C:\Windows\System32\wsl.exe -d Ubuntu-24.04 --cd /home/USER/work -- /usr/local/bin/node /home/USER/.local/share/toolsenabled-fleet-mcp/bin/toolsenabled-host.js serve --actor claude --state-root /home/USER/.toolsenabled-fleet-mcp
+```
+
+Calling `claude.cmd` with the quoted separator avoids PowerShell's handling of
+`--` through the npm PowerShell launcher. In other shells use their normal
+argument quoting. Both examples address the same Linux state. The Codex package
+entry requires workers off and Standard tier; use the standalone host entry and
+a separate setup for workers. Neither example enables workers.
+
+A cold WSL start can approach Codex's default MCP startup timeout. The explicit
+60-second `startup_timeout_sec` allows time for WSL and the Fleet server to
+initialize. This is separate from a worker's Codex startup timeout. Windows MCP
+`env`/`env_vars` reach `wsl.exe`; they do not automatically become Linux
+environment variables. Put nonsecret settings after `env` in the Linux command,
+as above, or deliberately configure `WSLENV`. Do not embed credentials in argv.
+`setup --print-server-json` prints a Linux-side command, which still needs this
+Windows wrapper and an explicit actor.
+
+### Worker sign-in and slow startup
+
+Prefer a separate Linux-side Codex profile and authenticate with Codex itself:
+
+```sh
+CODEX_HOME="$HOME/.codex-fleet" codex login --device-auth
+```
+
+Pass that Linux `CODEX_HOME` to Fleet's Linux process if workers should use it.
+The CLI creates and manages its own credentials. Do not copy or synchronize
+`auth.json` between Windows and WSL; independently refreshing clients can
+conflict. A Windows profile under `/mnt/c` can add substantial startup time,
+including plugins and session databases; relocating only `CODEX_SQLITE_HOME`
+does not remove all of that overhead.
+
+If a Linux-native profile still starts slowly, explicitly set
+`TOOLSENABLED_CODEX_START_TIMEOUT_MS=180000` in Fleet's Linux environment.
+Accepted values are 1000 through 600000 milliseconds; the default is 60000.
+This affects session startup/resume only, not the worker's task duration.
+`CODEX_START_TIMEOUT` is returned with an actionable message. The failed circle
+remains visible; after fixing the cause use `agent.restart` on that node, or
+remove it. No automatic billing or account fallback occurs.
+
+### Strict permission inheritance
+
+Fleet observes Linux ancestor CLI arguments. It cannot observe a Windows lead
+through `wsl.exe`, so that lead falls back to level 2. Windows bypass flags and
+`TOOLSENABLED_LEVEL_CAP=4` cannot raise it. The cap only narrows. Fleet does not
+accept a declared level or fabricate a Linux ancestor.
+
+For workers that need the lead's observable unattended permissions, run the
+lead CLI itself **inside WSL**, sign in there, and choose its permissions in
+that CLI. Roles, the saved Fleet tier and any cap can still lower the result.
+Alternatively, host Codex workers can send supported confirmation requests to
+`node bin/toolsenabled-host.js interactions --watch --state-root ABSOLUTE_STATE`
+in your own WSL terminal. Each answer applies only to that pending request;
+it does not raise the inherited level. Unanswered requests expire, and other
+unsupported headless approvals are declined. See [host interactions](host-interactions.md).
+
+`MCP_TOOL_SURFACE_INSTANCE_UNVERIFIABLE` means Fleet could not verify the live
+client/server instance. It is an unknown diagnostic, not proof that the tools
+failed. Check actual initialization and tools/list; an invisible Windows parent
+may remain unverifiable after a restart.
+
+### Full worker reports
+
+`agent.wait` and tree `lastTurn` return a preview plus `truncated`, `fullLength`,
+`reportId` and `nextOffset`. Retrieve the rest using
+`agent.wait({"reportId":"RETURNED_ID","offset":RETURNED_NEXT_OFFSET})`.
+Continue until `nextOffset` is null; use offset 0 to reread. Pages default to
+4000 UTF-16 code units and do not consume pending reports. Full reports remain
+in the private tree state after delivery, later turns and server restart.
+The lead may read its tree's reports; workers may read only their descendants'
+reports with an existing `agent.wait` grant. Existing reports already truncated
+by an older version cannot be reconstructed by this update.
 
 ## Configuration ownership
 
@@ -147,7 +242,7 @@ The closed-writer requirement also applies during rollback and cleanup. POSIX ch
 
 ## Shared source and packaging
 
-`installer/host/build.sh` packages the committed `installer/openshell/SOURCE-ALLOWLIST` Fleet runtime with the host lifecycle/registration helpers and shared filesystem verifier. It emits `dist/host/toolsenabled-host-1.9.0-linux-x64.tar.gz` and `SHA256SUMS`; the manifest records `mode: host`, source commit and runtime requirements. The current runtime has no production npm dependencies. Provider CLIs and npm/Node toolchains are excluded. Every packaged directory is 0700 and every regular file is 0600 or executable 0700.
+`installer/host/build.sh` packages the committed `installer/openshell/SOURCE-ALLOWLIST` Fleet runtime with the host lifecycle/registration helpers and shared filesystem verifier. It emits `dist/host/toolsenabled-host-1.9.1-linux-x64.tar.gz` and `SHA256SUMS`; the manifest records `mode: host`, source commit and runtime requirements. The current runtime has no production npm dependencies. Provider CLIs and npm/Node toolchains are excluded. Every packaged directory is 0700 and every regular file is 0600 or executable 0700.
 
 A fixture build proves layout and reproducibility; it does not qualify real provider behavior. Build and install/setup/uninstall require no package download.
 
