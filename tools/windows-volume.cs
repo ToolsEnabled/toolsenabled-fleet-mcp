@@ -11,8 +11,16 @@ public static class ToolsEngineInstallerVolume {
   public static void PublishFile(string source,string destination) {
     // Same-directory publication only, enforced by the calling path validator.
     // No cross-volume copy or delayed reboot operation is enabled.
-    if(!MoveFileExW(source,destination,0x1|0x8))
-      throw new InvalidOperationException("The private state file could not be published.");
+    // Even delete-sharing readers can transiently block replacement on NTFS.
+    // Wait for those readers without changing the file ACL or publication
+    // operation. Persistent access denials still fail within a bounded window.
+    var deadline=System.Diagnostics.Stopwatch.StartNew();
+    while(!MoveFileExW(source,destination,0x1|0x8)) {
+      int error=Marshal.GetLastWin32Error();
+      if((error!=5&&error!=32)||deadline.ElapsedMilliseconds>=2000)
+        throw new InvalidOperationException("The private state file could not be published.");
+      System.Threading.Thread.Sleep(20);
+    }
   }
   [StructLayout(LayoutKind.Sequential)]
   struct Information {

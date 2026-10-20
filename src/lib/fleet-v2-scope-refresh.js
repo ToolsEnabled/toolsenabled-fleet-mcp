@@ -5,13 +5,17 @@ const { normalize } = require('./fleet-folder-scope');
 const fail = message => Object.assign(new Error(message), { code: 'FLEET_PARENT_SCOPE_UNAVAILABLE' });
 function readScope(stateRoot) {
   const file = path.join(stateRoot, 'host-mode.json');
+  // Inspect Windows ACLs before opening the snapshot: the native security
+  // helper can take seconds, and a held reader blocks Windows replacement.
+  // The opened identity must still match the entry whose ACLs were inspected.
+  const checked = process.platform === 'win32'
+    ? require('./windows-state-security').assertEntry(file, false) : null;
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16384 || process.platform !== 'win32' &&
       ((stat.mode & 0o077) || stat.uid !== process.getuid())) throw fail('The parent policy record must be a bounded private file.');
-    if (process.platform === 'win32') {
-      const checked = require('./windows-state-security').assertEntry(file, false);
+    if (checked) {
       if (checked.dev !== stat.dev || checked.ino !== stat.ino) throw fail('The parent policy record changed during validation.');
     }
     const config = JSON.parse(fs.readFileSync(fd, 'utf8'));

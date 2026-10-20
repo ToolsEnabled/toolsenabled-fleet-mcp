@@ -40,3 +40,45 @@ test('native Fleet state has private inherited file ACLs and rejects links and w
   assert.throws(() => security.assertTree(state), { code: 'HOST_STATE_UNSAFE' });
   assert.equal(fs.readFileSync(token, 'utf8'), 'synthetic-test-token');
 });
+
+
+test('native configuration publication waits for short readers and refuses persistent locks', native, t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-publish-lock-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const destination = path.join(base, 'host-mode.json'), source = path.join(base, 'replacement.tmp');
+  fs.writeFileSync(destination, 'old'); fs.writeFileSync(source, 'new');
+  const probe = `using System; using System.IO; using System.Threading;
+    public static class FleetPublishReaderProbe {
+      public static void Run(string file, bool release, Action publish) {
+        var reader = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        Thread closer = null;
+        if (release) { closer = new Thread(() => { Thread.Sleep(350); reader.Dispose(); }); closer.Start(); }
+        try { publish(); } finally { if (closer != null) closer.Join(); reader.Dispose(); }
+      }
+    }`;
+  const command = "$ErrorActionPreference='Stop';$r=[Console]::In.ReadToEnd()|ConvertFrom-Json;"
+    + 'Add-Type -Path $r.helper;Add-Type -TypeDefinition $r.probe;'
+    + '$publish=[Action]{[ToolsEngineInstallerVolume]::PublishFile($r.source,$r.destination)};'
+    + '$watch=[Diagnostics.Stopwatch]::StartNew();'
+    + 'try{[FleetPublishReaderProbe]::Run($r.destination,$r.release,$publish);$ok=$true}catch{$ok=$false};'
+    + '@{ok=$ok;elapsed=$watch.ElapsedMilliseconds}|ConvertTo-Json -Compress';
+  const shell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const run = release => {
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(command, 'utf16le').toString('base64')], {
+      input: JSON.stringify({ helper: path.join(engine, 'tools/windows-volume.cs'), probe, source, destination, release }),
+      encoding: 'utf8', windowsHide: true, timeout: 15000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.replace(/^\uFEFF/, ''));
+  };
+  const blocked = run(false);
+  assert.equal(blocked.ok, false);
+  assert.ok(blocked.elapsed >= 1900 && blocked.elapsed < 5000, JSON.stringify(blocked));
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'old');
+  assert.equal(fs.readFileSync(source, 'utf8'), 'new');
+  const transient = run(true);
+  assert.equal(transient.ok, true, JSON.stringify(transient));
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'new');
+  assert.equal(fs.existsSync(source), false);
+});
