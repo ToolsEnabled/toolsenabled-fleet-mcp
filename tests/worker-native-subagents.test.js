@@ -155,7 +155,9 @@ for (const mode of ['host', 'openshell']) test(`${mode}: accepted levels and res
     GOOGLE_API_KEY: 'synthetic-sign-in', TOOLSENABLED_STATE_ROOT: scratch };
   const calls = [];
   const start = resumed => async options => { calls.push({ options, resumed }); return { threadId: 'thread', threadCwd: folder,
-    resolvedSandbox: { type: 'readOnly' }, adapter: {}, close() {} }; };
+    resolvedSandbox: { type: { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
+      'danger-full-access': 'dangerFullAccess' }[options.threadOptions?.sandbox] || 'workspaceWrite' },
+    adapter: {}, close() {} }; };
   const common = { env, workspaceRoot: folder, socketPath: path.join(folder, 'tree.sock'), agentApiMode: 'Enabled',
     startClaude: start(false), resumeClaude: start(true), startCodex: start(false), resumeCodex: start(true),
     startAcp: start(false), resumeAcp: start(true) };
