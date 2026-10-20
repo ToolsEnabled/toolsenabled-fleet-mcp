@@ -1,5 +1,7 @@
 # ToolsEnabled Fleet MCP
 
+Vendor distribution boundaries and current review status: [docs/PLUGIN-POLICY.md](docs/PLUGIN-POLICY.md).
+
 This repository contains the standalone Fleet MCP source and its coordination-only
 Codex package. The source now includes published Fleet 1.9.1 from
 [toolsenabled-engine](https://github.com/ToolsEnabled/toolsenabled-engine/tree/fleet-mcp-1.9.1-source),

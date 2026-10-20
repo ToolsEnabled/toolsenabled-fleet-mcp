@@ -12,7 +12,7 @@ const real = x => x;
 test('valid Standard workers-off core preserves the codex actor', async () => {
   let actual;
   await main({ enterWorkspace: () => {}, env, real, readConfig: (root, options) => { assert.equal(root,state);assert.equal(options.setupKind,'plugin');return valid; }, serve: (config, actor) => { actual={config,actor}; } });
-  assert.deepEqual(actual,{config:valid,actor:{actor:'codex'}});
+  assert.deepEqual(actual,{config:valid,actor:{actor:'codex',allowedToolNames:require('./.codex-plugin/policy.json').allowedTools}});
 });
 test('missing or relative configuration refuses before reading state', () => {
   for (const input of [{}, {...env,FLEET_MCP_CODEX_STATE_ROOT:'relative'}, {FLEET_MCP_CODEX_STATE_ROOT:state}])
@@ -58,4 +58,14 @@ test('canonical selected project becomes the server cwd before relative tool dis
   const result = spawnSync(process.execPath, ['-e', script], { cwd: fixture, env: process.env, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, fs.realpathSync(selected));
+});
+
+test('plugin metadata names the reviewed product and one matching marketplace entry', () => {
+ const manifest=require('./.codex-plugin/plugin.json');
+ const marketplace=require('./.agents/plugins/marketplace.json');
+ assert.equal(manifest.name,'toolsenabled-fleet');
+ assert.equal(marketplace.plugins[0].name,manifest.name);
+ assert.equal(manifest.interface.displayName,'ToolsEnabled Fleet');
+ assert.ok(fs.existsSync(path.join(__dirname,'PRIVACY.md')));
+ assert.ok(fs.existsSync(path.join(__dirname,'docs/PLUGIN-POLICY.md')));
 });
