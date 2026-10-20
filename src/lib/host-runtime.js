@@ -237,7 +237,8 @@ function setupHost(config, { pluginRebindFrom = null, passEnv } = {}) {
     { installRoot: fs.realpathSync(INSTALL_ROOT), tier: config.tier, homedir: () => accountHome, allowHome: true });
   if (!resolvedChoice.ok) refuse(resolvedChoice.code, resolvedChoice.message);
   const relative = path.relative(accountHome, candidate);
-  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+  if (config.setupKind === 'plugin'
+      && (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
     refuse('HOST_WORKSPACE_OUTSIDE_HOME', 'Choose a workspace inside your account home so the mediated file tools can use it.');
   }
   const previous = machineRecord.readMachineRecord({ servicesRoot, adopt: false });

@@ -70,11 +70,11 @@ function normalizeBinding(value) {
   }
   return Object.freeze(result);
 }
-function resourceKey(value, { exactWorkspace = false } = {}) {
+function resourceKey(value, { exactWorkspace = false, validateResourcePath = assertAccountProfilePath } = {}) {
   if (typeof value !== 'string' || !path.isAbsolute(value) || value.includes('\0')) {
     refuse('BYTE_RESOURCE_INVALID', 'The provider must supply an absolute canonical resource.');
   }
-  const admitted = assertAccountProfilePath(value, {
+  const admitted = validateResourcePath(value, {
     field: 'byte coordination resource',
     exactWorkspace
   });
@@ -158,7 +158,8 @@ class ByteAuthority {
   //                         drops its replacement payload from the journal
   constructor({ stateRoot, materialize, publish, prepareCreate, reconcileCreateStage, now = () => Date.now(), lockTimeoutMs = LOCK_TIMEOUT_MS,
     storeName = 'byte-coordination', maxResourceBytes = MAX_RESOURCE_BYTES, readSetScope = 'scope',
-    writeRequiresObservation = false, observeOwnWrites = false, pruneCommittedPayloads = false } = {}) {
+    writeRequiresObservation = false, observeOwnWrites = false, pruneCommittedPayloads = false,
+    validateResourcePath = assertAccountProfilePath, refreshAuthorization = () => {} } = {}) {
     if (typeof materialize !== 'function' || typeof publish !== 'function' || typeof now !== 'function'
         || !Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs < 0) {
       refuse('BYTE_ADAPTER_INVALID', 'Byte coordination requires private materialize and publish adapters.');
@@ -167,7 +168,8 @@ class ByteAuthority {
         || !Number.isSafeInteger(maxResourceBytes) || maxResourceBytes < 1 || maxResourceBytes > MAX_CONFIGURABLE_RESOURCE_BYTES
         || !['scope', 'resource'].includes(readSetScope)
         || typeof writeRequiresObservation !== 'boolean' || typeof observeOwnWrites !== 'boolean'
-        || typeof pruneCommittedPayloads !== 'boolean') {
+        || typeof pruneCommittedPayloads !== 'boolean' || typeof validateResourcePath !== 'function'
+        || typeof refreshAuthorization !== 'function') {
       refuse('BYTE_ADAPTER_INVALID', 'Byte coordination options are invalid.');
     }
     const directory = stateRoot
@@ -187,7 +189,13 @@ class ByteAuthority {
     this.writeRequiresObservation = writeRequiresObservation;
     this.observeOwnWrites = observeOwnWrites;
     this.pruneCommittedPayloads = pruneCommittedPayloads;
+    this.validateResourcePath = validateResourcePath;
+    this.refreshAuthorization = refreshAuthorization;
     this.callbackErrors = new WeakSet();
+  }
+
+  _resourceKey(value, options = {}) {
+    return resourceKey(value, { ...options, validateResourcePath: this.validateResourcePath });
   }
 
   async _call(callback, argument) {
@@ -199,6 +207,7 @@ class ByteAuthority {
   }
 
   async _assertCurrent(callback) {
+    await this._call(this.refreshAuthorization);
     if (callback !== undefined) {
       if (typeof callback !== 'function') refuse('BYTE_ADAPTER_INVALID', 'assertCurrent must be a private callback.');
       await this._call(callback);
@@ -358,7 +367,7 @@ class ByteAuthority {
   }
 
   async _snapshot(resource, materialize = this.materialize, { exactWorkspace = false } = {}) {
-    const canonical = resourceKey(resource, { exactWorkspace });
+    const canonical = this._resourceKey(resource, { exactWorkspace });
     const value = await this._call(materialize, canonical);
     if (value && value.present === false && (value.bytes === undefined || value.bytes === null)) {
       return { present: false, bytes: null };
@@ -456,7 +465,7 @@ class ByteAuthority {
     exactWorkspace = false
   } = {}) {
     const binding = normalizeBinding(rawBinding);
-    const resource = resourceKey(rawResource, { exactWorkspace });
+    const resource = this._resourceKey(rawResource, { exactWorkspace });
     if (validateRead !== undefined && typeof validateRead !== 'function') refuse('BYTE_ADAPTER_INVALID', 'validateRead must be an internal callback.');
     if (materializeRead !== undefined && typeof materializeRead !== 'function') refuse('BYTE_ADAPTER_INVALID', 'materializeRead must be an internal callback.');
     return this._locked(async db => {
@@ -687,7 +696,7 @@ class ByteAuthority {
   // incidental snippet slow somebody else's work down.
   async recordExposure({ binding: rawBinding, resource: rawResource, startByte, endByte, tool, materializeRead, assertCurrent } = {}) {
     const binding = normalizeBinding(rawBinding);
-    const resource = resourceKey(rawResource);
+    const resource = this._resourceKey(rawResource);
     // The tool name is required: a record of exposure that cannot say what did
     // the exposing is not provenance, it is only a timestamp.
     if (typeof tool !== 'string' || !tool || tool.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(tool)) {
@@ -723,7 +732,7 @@ class ByteAuthority {
 
   async applyPatch({ binding: rawBinding, resource: rawResource, receiptRef, derivePatch, assertCurrent } = {}) {
     const binding = normalizeBinding(rawBinding);
-    const resource = resourceKey(rawResource);
+    const resource = this._resourceKey(rawResource);
     if (typeof derivePatch !== 'function' || (receiptRef !== undefined && typeof receiptRef !== 'string')) {
       refuse('BYTE_ADAPTER_INVALID', 'A private patch derivation callback is required.');
     }
@@ -747,7 +756,7 @@ class ByteAuthority {
       const noOp = before.equals(after);
       const operation = {
         schemaVersion: SCHEMA_VERSION, operationId: token('operation'), binding, resource,
-        op: 'patch', writeIntent: null, publicationPath: assertAccountProfilePath(rawResource, { field: 'byte publication path' }),
+        op: 'patch', writeIntent: null, publicationPath: this.validateResourcePath(rawResource, { field: 'byte publication path' }),
         beforePresent: true, afterPresent: true, publicationMode: 'replace-existing', createPreparation: null,
         receiptRef: latest.receiptRef, beforeVersion: current.version, afterVersion: current.version + (noOp ? 0 : 1), noOp,
         startByte: patch.startByte, endByte: patch.endByte, replacementBase64: replacement.toString('base64'),
@@ -763,7 +772,7 @@ class ByteAuthority {
 
   async applyWrite({ binding: rawBinding, resource: rawResource, bytes, assertCurrent } = {}) {
     const binding = normalizeBinding(rawBinding);
-    const resource = resourceKey(rawResource);
+    const resource = this._resourceKey(rawResource);
     if (!Buffer.isBuffer(bytes) || bytes.length > this.maxResourceBytes) {
       refuse('BYTE_WRITE_INVALID', 'A whole-file write requires a bounded Buffer.');
     }
@@ -781,7 +790,7 @@ class ByteAuthority {
       const noOp = before.present && before.bytes.equals(after);
       const operation = {
         schemaVersion: SCHEMA_VERSION, operationId: token('operation'), binding, resource,
-        op: 'write', writeIntent: 'blind-whole-file', publicationPath: assertAccountProfilePath(rawResource, { field: 'byte publication path' }),
+        op: 'write', writeIntent: 'blind-whole-file', publicationPath: this.validateResourcePath(rawResource, { field: 'byte publication path' }),
         beforePresent: before.present, afterPresent: true,
         publicationMode: before.present ? 'replace-existing' : 'create-only', createPreparation: null,
         receiptRef: null, beforeVersion: current.version, afterVersion: current.version + (noOp ? 0 : 1), noOp,
@@ -866,7 +875,7 @@ class ByteAuthority {
   // (create-only, never replacing a file another writer made first).
   async observeAbsence({ binding: rawBinding, resource: rawResource, assertCurrent } = {}) {
     const binding = normalizeBinding(rawBinding);
-    const resource = resourceKey(rawResource);
+    const resource = this._resourceKey(rawResource);
     return this._locked(async db => {
       await this._assertCurrent(assertCurrent);
       this._scope(db, binding);
@@ -978,7 +987,7 @@ class ByteAuthority {
     if (resources !== undefined && (!Array.isArray(resources) || resources.some(value => typeof value !== 'string'))) {
       refuse('BYTE_RESOURCE_INVALID', 'Recovery resources must be an explicit array of canonical resource paths.');
     }
-    const selected = resources === undefined ? null : new Set(resources.map(resourceKey));
+    const selected = resources === undefined ? null : new Set(resources.map(resource => this._resourceKey(resource)));
     return this._locked(db => this._recoverPendingLocked(db, selected));
   }
 
@@ -1102,7 +1111,7 @@ class ByteAuthority {
     if (!scope || scope.binding_json !== json(binding) || !resource
         || resource.version !== operation.beforeVersion || resource.sha256 !== operation.beforeSha256
         || resource.byte_length !== operation.beforeBytes || resource.present !== Number(beforePresent)
-        || resourceKey(operation.resource) !== operation.resource) {
+        || this._resourceKey(operation.resource) !== operation.resource) {
       refuse('BYTE_STATE_CORRUPT', 'The pending publication no longer matches its recorded scope and base resource.');
     }
     return legacy ? { ...operation, op: 'patch', beforePresent: true, afterPresent: true,

@@ -10,6 +10,8 @@ install.cmd --workspace "C:\Users\YOU\Projects\project" --enable-workers
 
 Setup prints the exact `mcpServers` entry for your client and the installed check/uninstall commands. It does not edit provider configuration or read provider credentials. Keep using the provider's official sign-in. An MCP client should run the printed entry directly so Fleet can observe its parent process. Unobservable ancestry uses the conservative fallback; roles and explicit caps can only narrow it.
 
+Standalone unrestricted file mediation can cover permitted projects on other local drives and shared directories. The startup project remains the base for relative paths. Confined sessions and vendor plugins retain their project limits. Known credential and executable control paths remain protected; native file/shell edits do not join mediation. All participating sessions must use the same Fleet state root for shared receipts and locks.
+
 State uses a protected account/SYSTEM/Administrators DACL. Links, hard links, broadened private-file ACLs and unsupported volumes are refused. Worker process trees use Windows Job Objects and creation-time identities. A random session token authenticates the local named pipe; stopped or replaced sessions lose access. These are ownership and cooperative-agent controls, not protection from another program with the same account privileges.
 
 Close Fleet clients before uninstalling. Uninstall checks the installed file hashes and refuses changed runtime files or active servers. It removes that version only; state and workspace are retained. Remove the MCP entry from your client when you retire the installation. Keep older versions until the new one is checked.

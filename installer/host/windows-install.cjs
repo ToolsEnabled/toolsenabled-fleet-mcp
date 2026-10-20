@@ -130,6 +130,8 @@ async function main(argv) {
   assert.ok(!inside(options.root, here) && !inside(here, options.root) && options.root.toLowerCase() !== here.toLowerCase(), 'Extract the release outside its installation root.');
   assert.ok(!inside(options.root, workspace) && !inside(workspace, options.root) && options.root.toLowerCase() !== workspace.toLowerCase(), 'Workspace and installation must be separate.');
   security.check('ancestors', options.root);
+  const stateRoot = path.join(options.root, 'state');
+  assert.equal(fs.existsSync(stateRoot), false, 'Existing Fleet state is retained. Select a fresh --root for this installation.');
   const destination = path.join(options.root, 'versions', record.version);
   assert.equal(fs.existsSync(destination), false, 'This version is already installed; run its check command.');
   security.check('create', destination);
@@ -142,10 +144,14 @@ async function main(argv) {
   }
   security.assertTree(destination);
   verify(destination, record);
-  const stateRoot = path.join(options.root, 'state');
   const entry = path.join(destination, 'runtime/bin/toolsenabled-host.js');
-  run(entry, ['setup', '--plugin', '--state-root', stateRoot, '--workspace', workspace, '--tier', options.tier,
-    ...(options.workers ? ['--enable-workers'] : [])]);
+  security.check('create', stateRoot);
+  fs.writeFileSync(path.join(stateRoot, 'host-mode.json'), JSON.stringify({
+    schemaVersion: 1, mode: 'host', workers: options.workers, tier: options.tier,
+    workspace, stateRoot, installRoot: path.join(destination, 'runtime'), nodePath: process.execPath
+  }, null, 2) + '\n', { flag: 'wx' });
+  security.assertTree(stateRoot);
+  run(entry, ['setup', '--state-root', stateRoot]);
   const mcpServer = JSON.parse(run(entry, ['setup', '--state-root', stateRoot, '--print-server-json']));
   const saved = { version: record.version, directory: destination, stateRoot, workspace,
     releaseSha256: sha(fs.readFileSync(path.join(destination, 'release.json'))), mcpServer };

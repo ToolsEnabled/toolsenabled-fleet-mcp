@@ -670,6 +670,7 @@ async function dispatch(message, options = {}) {
         personChannelFrom: options.personChannelFrom,
         personChannelScope: options.personChannelScope,
         fileToolContext: options.fileToolContext,
+        hostFileAuthorization: options.hostFileAuthorization,
         ...(options.toolMode === undefined ? {} : { toolMode: options.toolMode }),
         ...(options.agentApiMode === undefined ? {} : { agentApiMode: options.agentApiMode }),
         ...(agentId === undefined ? {} : { agentId }),
@@ -999,12 +1000,19 @@ function start(startOptions = {}) {
   try { recordMcpSurface({ ...options, transport: 'stdio-direct' }); } catch {}
   // Resolved ONCE, before the first line is read. Resolving per call would let a
   // record edited mid-session widen a running agent's ceiling without restart.
-  const permissionSession = resolvePermissionSession(options);
+  const observation = process.env.TOOLSENABLED_RUNTIME_MODE === 'host'
+    ? require('./lib/agents/permission-level').leadPermissionContext({
+      registry: require('./lib/agents/registry').activeRegistry(), env: process.env })
+    : null;
+  const permissionSession = resolvePermissionSession(observation ? { ...options, leadLevel: observation.level } : options);
   // One anonymous scope belongs to this actual stdin transport, not every
   // caller of processMessage in this process. Other transports must supply
   // their own private authenticated scope instead of sharing a fallback.
   const directFileScope = fileToolContext.createFileToolContext({ scopeKind: 'standalone-mcp' });
-  const lineOptions = { ...options, permissionSession, fileToolContext: directFileScope };
+  const hostFileAuthorization = typeof options.inheritedFileAccess === 'function'
+    ? require('./lib/host-file-access').createInherited({ fileToolContext: directFileScope, resolve: options.inheritedFileAccess })
+    : require('./lib/host-file-access').create({ fileToolContext: directFileScope, permissionSession, observation });
+  const lineOptions = { ...options, permissionSession, fileToolContext: directFileScope, hostFileAuthorization };
   openLastWords(options);
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   // Calls are scheduled by effect (see createLineDispatcher): reads run side

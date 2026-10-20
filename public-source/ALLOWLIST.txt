@@ -197,6 +197,7 @@ src/lib/host-agent-mode.js
 src/lib/host-audit-keystore.js
 src/lib/host-audit-keystore.py
 src/lib/host-descriptions.js
+src/lib/host-file-access.js
 src/lib/host-generic-entry.js
 src/lib/host-input-content.js
 src/lib/host-interaction-terminal.js
@@ -383,6 +384,7 @@ tests/helpers/openai-compatible-stub.js
 tests/host-canonical-policy.test.js
 tests/host-cli-output.test.js
 tests/host-control-workspace-autorun.test.js
+tests/host-file-access.test.js
 tests/host-global-workspace.test.js
 tests/host-input-content.test.js
 tests/host-input-context.test.js

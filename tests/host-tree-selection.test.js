@@ -129,3 +129,18 @@ test('host mode actually loads selected tree and preserves stopped node settings
   assert.equal(record.root.actor, null);
   assert.equal(record.root.displayName, 'Chosen lead name');
 });
+
+test('a root role cap narrows the MCP session even when the observed lead is unrestricted', async t => {
+  const f = fixture(t);
+  const shared = require('../src/lib/openshell-agent-host');
+  const mode = require('../src/lib/host-agent-mode').startHostAgentMode({
+    config: { mode: 'host', workers: true, workspace: f.root, stateRoot: path.join(f.root, 'host'), tier: 'unrestricted' },
+    listen: false, installTreeSpawnHost() {}, env: { TOOLSENABLED_RUNTIME_MODE: 'host' },
+    createLauncher: () => ({ start() { throw new Error('No worker was requested.'); } }),
+    createHost: options => shared.createOpenShellAgentHost({ ...options, leadLevel: 4, watchIntervalMs: 0,
+      roleHooks: { lead: () => ({ roleId: 'limited', surface: { names: ['host.read_file'] } }), maxLevel: () => 2 } })
+  });
+  t.after(() => mode.close());
+  await mode.ready;
+  assert.deepEqual(mode.context.permissionSession, require('../src/lib/permission-tier-policy').effectiveSession(2));
+});

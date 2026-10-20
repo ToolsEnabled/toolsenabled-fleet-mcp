@@ -155,6 +155,7 @@ src/lib/host-agent-mode.js
 src/lib/host-audit-keystore.js
 src/lib/host-audit-keystore.py
 src/lib/host-descriptions.js
+src/lib/host-file-access.js
 src/lib/host-generic-entry.js
 src/lib/host-input-content.js
 src/lib/host-interaction-terminal.js

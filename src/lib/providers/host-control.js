@@ -512,12 +512,14 @@ function checkRuntimeWriteRoots(candidatePath) {
   }
 }
 
-// Host mode has no OS sandbox. The sealed setup record, not a caller path or
-// ambient cwd, is its write boundary. A missing/untrusted record fails closed.
+// Confined host sessions and plugins use the sealed workspace. Standalone
+// unrestricted calls use the inherited full session and current setup ceiling.
+// OS permissions and the exclusions below still apply.
 // OpenShell keeps its existing profile boundary; the sandbox itself confines
 // that mode. The check runs again at every mediated publication step.
 function checkHostWorkspaceBoundary(candidatePath) {
   if (process.env.TOOLSENABLED_RUNTIME_MODE !== 'host') return;
+  if (require('../host-file-access').unrestricted()) return;
   let roots;
   try {
     const records = require('../setup/machine-record');
@@ -581,7 +583,8 @@ function failIfAccessDenied(error) {
 // file. See src/lib/canonical-path.js.
 function checkContainmentAndExclusions(candidatePath, { forWrite }) {
   const relativeToHome = path.relative(HOME, candidatePath);
-  if (relativeToHome.startsWith('..') || path.isAbsolute(relativeToHome)) {
+  if ((relativeToHome.startsWith('..') || path.isAbsolute(relativeToHome))
+      && process.env.TOOLSENABLED_RUNTIME_MODE !== 'host') {
     fail('HOST_PATH_OUTSIDE_PROFILE', 'path must be inside the owner profile tree.');
   }
   if (isCredentialProtectedPath(candidatePath)) {
@@ -656,6 +659,7 @@ function checkStateRoot(candidatePath, { forWrite }) {
 // containment and exclusion checks are not optional.
 function resolveHostPath(value, { mustExist = false, forWrite = false } = {}) {
   if (typeof value !== 'string' || !value.trim()) fail('HOST_PATH_INVALID', 'path must be a non-empty string.');
+  if (process.platform === 'win32' && path.isAbsolute(value)) value = require('../host-file-access').resourcePath(value);
   // A RELATIVE PATH IS RELATIVE TO THE OWNER PROFILE TREE, WHICH IS WHAT THE
   // TOOLS THAT TAKE ONE ALREADY SAY.
   //
@@ -1127,6 +1131,8 @@ function hostByteAuthority(scope) {
     hostAuthorityInstance = byteAuthorityModule().createByteAuthority({
       stateRoot, storeName: HOST_BYTE_STORE, maxResourceBytes: MAX_FILE_BYTES,
       readSetScope: 'resource', writeRequiresObservation: true, observeOwnWrites: true, pruneCommittedPayloads: true,
+      validateResourcePath: require('../host-file-access').resourcePath,
+      refreshAuthorization: require('../host-file-access').refresh,
       materialize: materializeHost, publish: publishHost,
       prepareCreate: prepareHostCreate, reconcileCreateStage: reconcileHostCreate
     });
@@ -1230,6 +1236,7 @@ function beginMediated(dependencies, toolName, target) {
   const assertCurrent = () => {
     assertActive(toolName);
     assertScope();
+    require('../host-file-access').assertCurrent();
     return contexts.assertFileToolInvocationCurrent(invocation, scope, toolName);
   };
   return { scope, binding, currentToolInvocation, assertCurrent };
@@ -1486,14 +1493,26 @@ function childScopeDirectorySnapshot(resolved, assertScope) {
 function listDir({ path: target = defaultHostListDirectory() } = {}, dependencies = {}) {
   assertActive('host.list_dir');
   const resolved = resolveHostPath(target, { mustExist: true });
-  if (!fs.lstatSync(resolved).isDirectory()) fail('HOST_PATH_INVALID', 'path is not a directory.');
+  const initial = fs.lstatSync(resolved, { bigint: true });
+  if (!initial.isDirectory()) fail('HOST_PATH_INVALID', 'path is not a directory.');
+  const canonical = hostResource(resolved);
+  const assertCurrentDirectory = () => {
+    resolveHostPath(resolved, { mustExist: true });
+    const current = fs.lstatSync(resolved, { bigint: true });
+    if (!current.isDirectory() || current.dev !== initial.dev || current.ino !== initial.ino
+        || hostResource(resolved) !== canonical) {
+      fail('HOST_FILE_IDENTITY_CHANGED', 'The listed directory changed while this call was waiting.');
+    }
+  };
   const assertScope = childScopeFileGuard(dependencies, 'host.list_dir', resolved);
   const scopedListing = dependencies.researchAccess ? childScopeDirectorySnapshot(resolved, assertScope) : null;
   // Admission precedes readdirSync and the per-entry metadata reads below.
   const requireRecordAsync = dependencies.requireRecordAsync || auditAdmission.requireRecordAsync;
   const recordAsync = dependencies.recordAsync || auditAdmission.recordAsync;
   const admitted = requireRecordAsync('host.list_dir.intent', resolved, {});
-  return admitted.then(() => {
+  return admitted.then(async () => {
+    await require('../host-file-access').refresh();
+    assertCurrentDirectory();
     let entries;
     const counted = {};
     try { entries = scopedListing ? scopedListing.read() : listDirEntries(resolved, undefined, counted); }
@@ -1507,7 +1526,9 @@ function listDir({ path: target = defaultHostListDirectory() } = {}, dependencie
       .catch(auditError => {
         process.stderr.write(`ToolsEnabled host.list_dir audit write failed: ${audit.redact(auditError && auditError.message || String(auditError))}\n`);
       })
-      .then(() => {
+      .then(async () => {
+        await require('../host-file-access').refresh();
+        assertCurrentDirectory();
         scopedListing?.assertDirectory();
         return boundedListing(resolved, entries, counted.total ?? entries.length);
       });

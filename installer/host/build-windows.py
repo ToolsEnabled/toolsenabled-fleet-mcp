@@ -49,7 +49,7 @@ def build(output):
         'It also prints check and uninstall commands. Run those from the installed version.\n'
         'Close all Fleet clients before uninstalling. Uninstall retains state and your project;\n'
         'remove the client registration yourself if you added it. A changed runtime is retained.\n'
-        'Versions install separately. Re-running setup with a new version rebinds its shared state.\n'
+        'Use a fresh --root for each installation; existing state is retained and never overwritten.\n'
         'Plugin-specific vendor restrictions are separate distributions and remain enforced there.\n\n'
         'Publication requires native Windows qualification of this exact extracted archive,\n'
         'including worker lifecycle, private ACL refusal, installation and removal.\n'
