@@ -11,8 +11,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const jobs = require('../src/lib/windows-job-control');
-const { safeLaunchEnvironment } = require('../src/lib/supervision/launch-environment');
+const engine = process.env.FLEET_PACKAGED_ENGINE || path.resolve(__dirname, '..');
+const jobs = require(path.join(engine, 'src/lib/windows-job-control'));
+const { safeLaunchEnvironment } = require(path.join(engine, 'src/lib/supervision/launch-environment'));
 
 assert.equal(process.platform, 'win32', 'the shipped engine requires the Windows Job Object contract');
 
@@ -469,6 +470,41 @@ async function assemblyCacheFailureNeverBreaksExecution(temp) {
   assert.equal(fs.statSync(assemblyCacheDirectory).isFile(), true, 'the blocking file must be left exactly as it was, never clobbered');
 }
 
+async function recoveryUsesTheExactRecordedTicks(temp) {
+  const filename = path.join(engine, 'src/lib/proc/process-group.js');
+  const groups = require(filename);
+  const child = jobs.spawnInJob(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    cwd: temp, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  }, { safeLaunchEnvironment });
+  child.on('error', () => {});
+  child.stdout.resume(); child.stderr.resume();
+  try {
+    const identity = await child.jobReady;
+    const startTime = groups.processStartTime(child.pid);
+    assert.equal(startTime, 'win32:' + identity.wrapperStartTicks);
+    const source = fs.readFileSync(filename, 'utf8');
+    const correct = 'const expectedStartTicks = startTime.slice(6);';
+    assert.equal(source.split(correct).length, 2, 'the mutation must hit the tested identity adapter');
+    const Module = require('node:module');
+    const mutated = new Module(filename, module);
+    mutated.filename = filename;
+    mutated.paths = module.paths;
+    mutated._compile(source.replace(correct,
+      'const expectedStartTicks = (BigInt(startTime.slice(6)) - 504911232000000000n).toString();'), filename);
+    await assert.rejects(mutated.exports.terminateProcessTree({ pid: child.pid, startTime }),
+      { code: 'WINDOWS_JOB_IDENTITY_MISMATCH' });
+    assert.equal(alive(identity.rootPid), true, 'an identity mismatch must not terminate a process');
+    const stopped = await groups.terminateProcessTree({ pid: child.pid, startTime });
+    assert.deepEqual(stopped, { signalled: [child.pid], survivors: [] });
+    assert.equal((await child.jobOutcome).activeProcesses, 0);
+    assert.equal((await child.jobClosed).failure, null);
+    assert.equal(alive(identity.rootPid), false);
+  } finally {
+    await child.terminateJob();
+    await child.jobClosed;
+  }
+}
+
 async function cancellationBeforeOwnerNeverStartsRoot(temp, duringPreparation) {
   const marker = path.join(temp, `must-not-run-${duringPreparation}.txt`);
   let releasePreparation;
@@ -513,10 +549,11 @@ async function cancellationBeforeOwnerNeverStartsRoot(temp, duringPreparation) {
     await deadMiddleTermination(temp);
     await staleCreationIdentityRefuses(temp);
     await retainedWrapperFallbackIsIdempotent(temp);
+    await recoveryUsesTheExactRecordedTicks(temp);
     assemblyCacheArgumentIsThreadedThroughArgv(temp);
     await assemblyCacheSkipsCompilation(temp);
     await assemblyCacheFailureNeverBreaksExecution(temp);
-    process.stdout.write('windows-job-control: natural exit, root-authority cleanup, dead-middle cleanup, PID-reuse fence, idempotent retained-handle fallback, and wrapper assembly caching passed\n');
+    process.stdout.write('windows-job-control: natural exit, root-authority cleanup, dead-middle cleanup, PID-reuse fence, retained-handle fallback, exact-tick recovery with offset mutation, and wrapper assembly caching passed\n');
     suitePassed = true;
   } finally {
     if (!suitePassed) {

@@ -25,7 +25,8 @@
 // outright) is found again by the same pid and start time when the tree is
 // next loaded, and ended then (see src/lib/openshell-tree-store.js).
 //
-// Linux only. Nothing here starts a process.
+// Linux process groups or retained native Windows Job Objects. Windows cleanup
+// uses a control helper bound to the recorded wrapper generation.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -132,8 +133,10 @@ async function terminateProcessTree({ pid, startTime = null } = {}, {
       throw Object.assign(new Error('Windows cleanup requires the exact retained job generation.'), { code: 'WINDOWS_JOB_IDENTITY_INVALID' });
     const current = processStartTime(pid);
     if (current === null || current !== startTime) return Object.freeze({ signalled: [], survivors: [] });
-    const fileTime = (BigInt(startTime.slice(6)) - 504911232000000000n).toString();
-    const outcome = await require('../windows-job-control').terminateRegisteredJob(pid, { expectedStartTicks: fileTime });
+    // The process claim and Job Object record both use .NET UTC ticks.
+    // Converting to FILETIME would change the identity and refuse cleanup.
+    const expectedStartTicks = startTime.slice(6);
+    const outcome = await require('../windows-job-control').terminateRegisteredJob(pid, { expectedStartTicks });
     if (outcome.activeProcesses !== 0) throw Object.assign(new Error('Windows cleanup did not prove an empty job.'), { code: 'WINDOWS_JOB_CLEANUP_UNPROVEN' });
     return Object.freeze({ signalled: [pid], survivors: [] });
   }

@@ -91,24 +91,40 @@ function parseArgv(argv, aliases = {}, { booleanNegation = false, booleans = [] 
 
 /** The level an agent's own command line starts it at, by its descriptor's rules. */
 function levelFromArgv(descriptor, argv) {
-  // Codex's clap short options accept attached values. Only normalize known
+  // Some CLI short options accept attached values. Only normalize described
   // value options; arbitrary prompt words never become options.
-  const words = descriptor.id === 'codex' ? argv.flatMap(word =>
-    /^-[sa][^=]/.test(word) ? [word.slice(0, 2), word.slice(2)] : [word]) : argv;
+  const syntax = descriptor.permissions.argv || {};
+  const words = argv.flatMap(word => (syntax.attachedValueOptions || []).some(option =>
+    word.startsWith(option) && word.length > option.length && word[option.length] !== '=')
+    ? [word.slice(0, 2), word.slice(2)] : [word]);
   const { options, flags } = parseArgv(words, descriptor.permissions.aliases, {
-    booleanNegation: descriptor.id === 'gemini',
+    booleanNegation: syntax.booleanNegation === true,
     booleans: descriptor.permissions.lead.flatMap(rule =>
       Object.entries(rule.when).filter(([, value]) => value === true).map(([name]) => name)),
   });
   // Explicit read-only config overrides can narrow inheritance. This is not
   // a general TOML/settings parser, and no config override grants authority.
-  if (descriptor.id === 'codex') {
+  if (syntax.readOnlyConfig) {
+    const config = syntax.readOnlyConfig;
     for (let index = 0; index < words.length && words[index] !== '--'; index += 1) {
       const word = words[index];
-      const value = ['-c', '--config'].includes(word) ? words[index + 1]
-        : word.startsWith('--config=') ? word.slice(9)
-          : word.startsWith('-c') && word.length > 2 ? word.slice(2).replace(/^=/, '') : null;
-      if (typeof value === 'string' && /^\s*sandbox_mode\s*=\s*(?:"read-only"|'read-only')\s*$/.test(value)) return LEVEL.READ_ONLY;
+      const option = config.options.find(name => word === name || word.startsWith(name + '=')
+        || /^-[A-Za-z]$/.test(name) && word.startsWith(name) && word.length > name.length);
+      const value = option === word ? words[index + 1] : option ? word.slice(option.length).replace(/^=/, '') : null;
+      const assignment = typeof value === 'string' && /^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*([\s\S]*?)\s*$/.exec(value);
+      if (assignment && assignment[1] === config.key) {
+        // Recognize plain/raw strings and quoted TOML scalars with comments.
+        // More complicated TOML (including multiline or unsupported escapes)
+        // is conservatively read-only rather than guessed to permit edits.
+        const raw = assignment[2];
+        let scalar = null;
+        const basic = /^("(?:[^"\\]|\\.)*")\s*(?:#[^\r\n]*)?$/.exec(raw);
+        const literal = /^'([^']*)'\s*(?:#[^\r\n]*)?$/.exec(raw);
+        if (basic) { try { scalar = JSON.parse(basic[1]); } catch { /* narrower fallback */ } }
+        else if (literal) scalar = literal[1];
+        else if (/^[A-Za-z0-9_.-]+$/.test(raw)) scalar = raw;
+        if (scalar === null || scalar === config.value) return LEVEL.READ_ONLY;
+      }
     }
   }
   for (const rule of descriptor.permissions.lead) {

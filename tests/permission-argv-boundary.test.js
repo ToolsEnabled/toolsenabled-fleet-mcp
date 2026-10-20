@@ -43,8 +43,30 @@ test('Codex attached short values and explicit read-only config narrow workers',
   for (const args of [
     ['-sread-only'], ['-c', 'sandbox_mode="read-only"'], ["-csandbox_mode='read-only'"],
     ['--config=sandbox_mode="read-only"'], ['--full-auto', '-c', 'sandbox_mode = "read-only"'],
+    ['-c', 'sandbox_mode=read-only'], ['--full-auto', '--config=sandbox_mode=read-only'],
+    ['-a', 'never', '-c', 'sandbox_mode="read-only" # readonly'],
+    ['-a', 'never', '-c', 'sandbox_mode="read\\u002donly"'],
+    ['-a', 'never', '-c', 'sandbox_mode="""read-only"""'],
+    ['-a', 'never', '-c', 'sandbox_mode="""\nread-only"""'],
+    ['-a', 'never', '-c', "sandbox_mode='''\nread-only'''"],
   ]) assert.equal(levelFromArgv(descriptor, args), 1, JSON.stringify(args));
   assert.equal(levelFromArgv(descriptor, ['--', '-sread-only']), 2);
   assert.equal(levelFromArgv(descriptor, ['--', '-c', 'sandbox_mode="read-only"']), 2);
   assert.equal(levelFromArgv(descriptor, ['-c', 'sandbox_mode="danger-full-access"']), 2);
+});
+
+test('argv syntax is validated descriptor data and survives renaming a provider', () => {
+  const { validateDescriptor } = require('../src/lib/agents/registry');
+  const source = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, '../config/agents/codex.json')));
+  source.id = 'fixture-cli'; source.name = 'Fixture CLI'; source.command = 'fixture-cli';
+  const renamed = validateDescriptor(source, 'fixture');
+  assert.equal(levelFromArgv(renamed, ['-sread-only']), 1);
+  assert.equal(levelFromArgv(renamed, ['--full-auto', '-c', 'sandbox_mode="read-only"']), 1);
+  for (const syntax of [
+    { booleanNegation: 'true' }, { attachedValueOptions: ['--long'] },
+    { attachedValueOptions: false }, { readOnlyConfig: { options: ['--config'], key: 'bad key', value: 'read-only' } },
+    { futureBehavior: true },
+  ]) {
+    assert.throws(() => validateDescriptor({ ...source, permissions: { ...source.permissions, argv: syntax } }, 'fixture'));
+  }
 });

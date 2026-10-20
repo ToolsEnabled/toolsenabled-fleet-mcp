@@ -155,6 +155,9 @@
           ]
         }
       }
+    },
+    "argv": {
+      "booleanNegation": true
     }
   }
 }
