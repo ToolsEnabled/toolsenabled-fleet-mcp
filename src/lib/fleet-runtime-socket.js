@@ -77,6 +77,13 @@ function runtimeSocketPath(preferred, { env = process.env, create = true } = {})
   return socket;
 }
 function assertPrivateRuntimeSocketPath(socket, { env = process.env } = {}) {
+  if (process.platform === 'win32') {
+    // The name has a fresh random component before hashing. Every request is
+    // separately authenticated by its token in private NTFS host state.
+    if (typeof socket !== 'string' || !/^\\\\\.\\pipe\\te-tree-[a-f0-9]{32}$/.test(socket))
+      throw refusal('The worker link must be a local Fleet named pipe.');
+    return socket;
+  }
   const base = runtimeBase(env);
   if (typeof socket !== 'string' || !path.isAbsolute(socket)
       || !socket.startsWith(base + path.sep)

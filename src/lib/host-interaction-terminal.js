@@ -50,6 +50,10 @@ function redactDisplayProse(value) {
   return (output + value.slice(cursor)).replace(plaintextCredentialPattern('gi'), '[credential omitted]');
 }
 function privateDirectory(folder, create = false) {
+  if (process.platform === 'win32') {
+    require('./windows-state-security').check(create ? 'create' : 'inspect', folder);
+    return;
+  }
   if (typeof process.getuid !== 'function') throw refusal('HOST_INPUT_PLATFORM_UNSUPPORTED', 'The interactive host route currently requires Linux or WSL.');
   if (!path.isAbsolute(folder) || path.resolve(folder) !== folder) throw refusal('HOST_INPUT_PATH_INVALID', 'An absolute normalized state folder is required.');
   if (create) fs.mkdirSync(folder, { mode: 0o700 });
@@ -58,6 +62,18 @@ function privateDirectory(folder, create = false) {
       || stat.uid !== process.getuid() || (stat.mode & 0o077)) {
     throw refusal('HOST_INPUT_PATH_INVALID', 'Interaction state must be direct, private and owned by you.');
   }
+}
+function privateDescriptor(file, opened) {
+  const stat = opened || fs.lstatSync(file);
+  if (process.platform === 'win32') {
+    const checked = require('./windows-state-security').assertEntry(file, false);
+    if (checked.ino !== stat.ino || checked.dev !== stat.dev)
+      throw refusal('HOST_INPUT_PATH_INVALID', 'The interaction descriptor changed during validation.');
+  }
+  if (!stat.isFile() || stat.nlink !== 1 || stat.size > 2048
+      || (process.platform !== 'win32' && (stat.uid !== process.getuid() || (stat.mode & 0o077))))
+    throw refusal('HOST_INPUT_PATH_INVALID', 'The interaction descriptor is not a private owner file.');
+  return stat;
 }
 function interactionFolder(stateRoot, create = false) {
   privateDirectory(stateRoot);
@@ -85,10 +101,14 @@ async function pruneStaleDescriptors(folder, env) {
   for (const name of fs.readdirSync(folder).filter(entry => /^[a-f0-9-]{36}\.json$/.test(entry))) {
     const file = path.join(folder, name);
     try {
-      const stat = fs.lstatSync(file);
-      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o077) || stat.size > 2048) continue;
+      privateDescriptor(file);
       const descriptor = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (descriptor?.v !== 1 || typeof descriptor.socketPath !== 'string' || !path.isAbsolute(descriptor.socketPath)) continue;
+      if (process.platform === 'win32') {
+        runtime.assertPrivateRuntimeSocketPath(descriptor.socketPath, { env });
+        if (await socketState(descriptor.socketPath) === 'dead') fs.rmSync(file, { force: true });
+        continue;
+      }
       let present = true;
       try { fs.lstatSync(descriptor.socketPath); } catch (error) { if (error.code === 'ENOENT') present = false; else continue; }
       if (present) {
@@ -132,9 +152,7 @@ function descriptors(stateRoot, env) {
     const file = path.join(folder, name);
     const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     try {
-      const stat = fs.fstatSync(fd);
-      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o077) || stat.size > 2048)
-        throw refusal('HOST_INPUT_PATH_INVALID', 'The interaction descriptor is not a private owner file.');
+      privateDescriptor(file, fs.fstatSync(fd));
       const descriptor = JSON.parse(fs.readFileSync(fd, 'utf8'));
       if (descriptor.v !== 1 || descriptor.id + '.json' !== name
           || typeof descriptor.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(descriptor.token)) {

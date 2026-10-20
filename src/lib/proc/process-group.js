@@ -25,7 +25,8 @@
 // outright) is found again by the same pid and start time when the tree is
 // next loaded, and ended then (see src/lib/openshell-tree-store.js).
 //
-// Linux only. Nothing here starts a process.
+// Linux process groups or retained native Windows Job Objects. Windows cleanup
+// uses a control helper bound to the recorded wrapper generation.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -68,6 +69,8 @@ function readProcessTable({ procRoot = '/proc', fileSystem = fs } = {}) {
 /** The start time of one pid, or null when it no longer exists. */
 function processStartTime(pid, options = {}) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (process.platform === 'win32' && !options.fileSystem && !options.procRoot)
+    return require('../process-claim-lock').processStartIdentity(pid);
   const { procRoot = '/proc', fileSystem = fs } = options;
   try {
     const row = parseStat(fileSystem.readFileSync(path.join(procRoot, String(pid), 'stat'), 'utf8'));
@@ -123,6 +126,20 @@ async function terminateProcessTree({ pid, startTime = null } = {}, {
   ownGroup = safeOwnGroup(),
 } = {}) {
   if (!Number.isSafeInteger(pid) || pid < 2) return Object.freeze({ signalled: [], survivors: [] });
+  if (process.platform === 'win32') {
+    // A Windows PID tree is not containment. Only the registered Job Object
+    // with the exact original wrapper generation may be asked to terminate.
+    if (!/^win32:\d{12,20}$/.test(String(startTime)))
+      throw Object.assign(new Error('Windows cleanup requires the exact retained job generation.'), { code: 'WINDOWS_JOB_IDENTITY_INVALID' });
+    const current = processStartTime(pid);
+    if (current === null || current !== startTime) return Object.freeze({ signalled: [], survivors: [] });
+    // The process claim and Job Object record both use .NET UTC ticks.
+    // Converting to FILETIME would change the identity and refuse cleanup.
+    const expectedStartTicks = startTime.slice(6);
+    const outcome = await require('../windows-job-control').terminateRegisteredJob(pid, { expectedStartTicks });
+    if (outcome.activeProcesses !== 0) throw Object.assign(new Error('Windows cleanup did not prove an empty job.'), { code: 'WINDOWS_JOB_CLEANUP_UNPROVEN' });
+    return Object.freeze({ signalled: [pid], survivors: [] });
+  }
   const first = readTable();
   const leader = first.get(pid);
   const expected = startTime === null || startTime === undefined ? null : String(startTime);

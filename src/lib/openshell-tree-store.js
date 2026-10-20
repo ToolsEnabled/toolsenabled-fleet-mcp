@@ -48,6 +48,10 @@ function treeFolder(stateRoot) {
 }
 
 function privateFolder(folder) {
+  if (process.platform === 'win32') {
+    require('./windows-state-security').check('create', folder);
+    return folder;
+  }
   fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
   try { fs.chmodSync(folder, 0o700); } catch { /* best effort on a shared mount */ }
   return folder;

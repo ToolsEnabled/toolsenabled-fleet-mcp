@@ -31,6 +31,12 @@ function privateFolder(folder, root) {
   if (!path.isAbsolute(root) || !path.isAbsolute(folder) || !within(root, folder)) {
     throw refusal('HOST_WORKER_PATH_INVALID', 'Worker files must stay in the private host state folder.');
   }
+  if (process.platform === 'win32') {
+    const security = require('./windows-state-security');
+    security.check('inspect', root);
+    security.check('create', folder);
+    return;
+  }
   fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
   if (fs.realpathSync(folder) !== path.resolve(folder)) throw refusal('HOST_WORKER_PATH_INVALID', 'Worker folders cannot cross links.');
   let cursor = folder;
@@ -207,17 +213,19 @@ function claudeEvents(onEvent, { workspaceRoot = null } = {}) {
 const levels = require('./agents/permission-level');
 const RESOLVED_SANDBOX = Object.freeze({ 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' });
 const SANDBOX_ORDER = Object.freeze(['readOnly', 'workspaceWrite', 'dangerFullAccess']);
-/* The sandbox the agent actually resolved must not be wider than the one this
-   level asked for. A level that names no sandbox keeps the person's own. */
+/* The already-created worker MCP entry carries the requested ceiling. A
+   stricter resolved sandbox cannot safely retain that entry either: refuse
+   the launch instead of letting MCP tools exceed the worker's actual policy. */
 function assertSandboxNotWider(session, settings, level) {
-  if (!settings.sandbox) return;
-  const asked = SANDBOX_ORDER.indexOf(RESOLVED_SANDBOX[settings.sandbox]);
-  // Nothing is wider than the widest sandbox, so there is nothing to confirm.
-  if (asked === SANDBOX_ORDER.length - 1) return;
+  const asked = settings.sandbox ? SANDBOX_ORDER.indexOf(RESOLVED_SANDBOX[settings.sandbox]) : null;
   const got = SANDBOX_ORDER.indexOf(session.resolvedSandbox && session.resolvedSandbox.type);
-  if (got === -1 || got > asked) {
+  if (got === -1 || (asked !== null && got > asked)) {
     try { session.close(); } catch { /* closing anyway */ }
-    throw refusal('HOST_WORKER_POLICY_WIDE', `The worker resolved a wider sandbox than level ${level} (${levels.LEVEL_NAMES[level]}) allows, so it was stopped.`);
+    throw refusal('HOST_WORKER_POLICY_WIDE', `The worker resolved an unknown or wider sandbox than level ${level} (${levels.LEVEL_NAMES[level]}) allows, so it was stopped.`);
+  }
+  if ((asked !== null && got < asked) || (level >= 2 && got === 0)) {
+    try { session.close(); } catch { /* closing anyway */ }
+    throw refusal('HOST_WORKER_POLICY_NARROWED', 'The worker resolved a stricter sandbox than its inherited permission level, so it was stopped. Start the lead at that stricter level and retry.');
   }
 }
 
@@ -312,7 +320,8 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
         try { await session.adapter.updateThreadSettings(session.threadId, { effort: spec.effort }); }
         catch (error) { session.close(); throw error; }
       }
-      return Object.freeze({ ...session, apiMode, level });
+      const resolvedLevel = { readOnly: 1, workspaceWrite: 3, dangerFullAccess: 4 }[session.resolvedSandbox?.type];
+      return Object.freeze({ ...session, apiMode, level: levels.narrowest(level, resolvedLevel) });
     }
     const mcpConfig = path.join(spec.nodeFolder, 'mcp.json');
     writePrivate(mcpConfig, JSON.stringify({ mcpServers: apiMode === 'Disabled' ? {} : { [SERVER_NAME]: { type: 'stdio', ...entry } } }) + '\n', config.stateRoot);

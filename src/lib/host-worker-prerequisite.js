@@ -9,6 +9,20 @@ const MESSAGE = 'Host workers need Linux 5.3+ with pidfd_open; this system lacks
 // admitted, and neither the OpenShell marker nor a successful earlier probe
 // selects a fallback or waives the guardian's own checks on every launch.
 function requireHostWorkerNative({ spawnSyncImpl = spawnSync } = {}) {
+  if (process.platform === 'win32') {
+    let probe;
+    try {
+      probe = spawnSyncImpl(process.execPath, [path.resolve(__dirname, '../../tools/windows-worker-probe.cjs')], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: false,
+        windowsHide: true, timeout: 45000, maxBuffer: 4096,
+      });
+      if (!probe.error && probe.status === 0 && !probe.signal
+          && probe.stdout === '{"available":true,"backend":"windows-job-object-v1"}\n')
+        return Object.freeze({ backend: 'windows-job-object-v1' });
+    } catch { /* Native failures do not admit an uncontained provider. */ }
+    throw Object.assign(new Error('Windows host workers require private NTFS state and a working native Job Object backend.'),
+      { code: 'WINDOWS_PROCESS_NATIVE_UNAVAILABLE', retryable: false });
+  }
   let result;
   try {
     result = spawnSyncImpl('/usr/bin/python3', ['-I', '-S', '-B',

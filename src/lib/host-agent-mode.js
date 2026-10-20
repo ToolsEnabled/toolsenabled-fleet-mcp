@@ -88,7 +88,12 @@ function workerToken(env, config) {
   const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0 || stat.size > 1024) {
+    if (process.platform === 'win32') {
+      const checked = require('./windows-state-security').assertEntry(filename, false);
+      if (checked.dev !== stat.dev || checked.ino !== stat.ino) throw refusal('HOST_WORKER_LINK_INVALID', 'The worker link file changed during validation.');
+    }
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 1024
+        || (process.platform !== 'win32' && (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0))) {
       throw refusal('HOST_WORKER_LINK_INVALID', 'The worker link file must be private and owned by you.');
     }
     const token = fs.readFileSync(fd, 'utf8').trim();
@@ -141,7 +146,18 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
     const confined = confinedTreeHost(host, config);
     installTreeSpawnHost(confined);
     actionPermissions();
-    return Object.freeze({ host: confined, context: context({ agentId: nodeId, sessionId, roleId, surface, config }),
+    const inheritedFileAccess = async () => {
+      const cap = Number(clean.TOOLSENABLED_LEVEL_CAP);
+      if ([1, 2, 3].includes(cap)) return false;
+      const result = await host.fileAccess();
+      if (result?.nodeId !== nodeId || result?.sessionId !== sessionId) {
+        throw refusal('HOST_WORKER_LINK_INVALID', 'The file-access handoff belongs to a different worker session.');
+      }
+      return result.unrestricted === true;
+    };
+    return Object.freeze({ host: confined, context: Object.freeze({
+      ...context({ agentId: nodeId, sessionId, roleId, surface, config }),
+      inheritedFileAccess }),
       ready: Promise.resolve(), close: async () => {} });
   }
   const agentId = actor && ID.test(actor) ? actor : 'host-owner';
@@ -192,7 +208,8 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
       ? { limits: () => { const live = require('./host-runtime').currentPluginLimits();
         return limitsFor(live && live.workers ? live : config); } }
       : config.providers || config.models ? { limits: limitsFor(config) } : {};
-    host = createHost({ mode: 'host', enableRoleControl, rootSessionId, workspaceRoot: folder, env: clean, launcher, recordedTier: config.tier || 'unrestricted', ...limits,
+    host = createHost({ mode: 'host', enableRoleControl, rootSessionId, workspaceRoot: folder, env: clean, launcher, recordedTier: config.tier || 'unrestricted',
+      unrestrictedFileRoot: config.setupKind !== 'plugin' && config.tier === 'unrestricted', ...limits,
       root, document: tree.document, persist: document => store.saveTree(tree.treeFile, document), nodeFolder: tree.nodeFolder,
       codexEndpoint: () => null });
     server = listen ? link.createTreeLinkServer({ socketPath, refuseExisting: true,
@@ -232,7 +249,10 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
     })();
     return closed;
   };
-  return Object.freeze({ host: confined, context: context({ agentId, sessionId: rootSessionId,
-    roleId: host.root.roleId, surface: host.root.surface, config }), ready, close, treeKey: tree.treeKey, socketPath });
+  return Object.freeze({ host: confined, context: Object.freeze({
+    ...context({ agentId, sessionId: rootSessionId,
+      roleId: host.root.roleId, surface: host.root.surface, config }),
+    permissionSession: require('./permission-tier-policy').effectiveSession(host.root.level, config.tier)
+  }), ready, close, treeKey: tree.treeKey, socketPath });
 }
 module.exports = { startHostAgentMode, workerFolder };

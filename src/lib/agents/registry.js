@@ -365,7 +365,32 @@ function validatePermissions(input, driver, source) {
     throw invalid(source, 'permissions must say how the lead\'s flags map to levels and how a worker starts at each level.');
   }
   if (!plain(input)) throw invalid(source, 'permissions must be an object.');
-  onlyKeys(input, ['aliases', 'lead', 'openShellMinimumLevel', 'workerMinimum', 'worker', 'remove', 'workerAgent'], source, 'permissions');
+  onlyKeys(input, ['aliases', 'argv', 'lead', 'openShellMinimumLevel', 'workerMinimum', 'worker', 'remove', 'workerAgent'], source, 'permissions');
+  let argv;
+  if (input.argv !== undefined) {
+    const row = input.argv;
+    if (!plain(row)) throw invalid(source, 'permissions.argv must be an object.');
+    onlyKeys(row, ['booleanNegation', 'attachedValueOptions', 'readOnlyConfig'], source, 'permissions.argv');
+    if (row.booleanNegation !== undefined && typeof row.booleanNegation !== 'boolean')
+      throw invalid(source, 'permissions.argv.booleanNegation must be boolean.');
+    const attached = row.attachedValueOptions === undefined ? [] : row.attachedValueOptions;
+    if (!Array.isArray(attached) || attached.length > 16 || attached.some(name => typeof name !== 'string' || !/^-[A-Za-z]$/.test(name)))
+      throw invalid(source, 'permissions.argv.attachedValueOptions needs short value options.');
+    let readOnlyConfig;
+    if (row.readOnlyConfig !== undefined) {
+      const config = row.readOnlyConfig;
+      if (!plain(config)) throw invalid(source, 'permissions.argv.readOnlyConfig must be an object.');
+      onlyKeys(config, ['options', 'key', 'value'], source, 'permissions.argv.readOnlyConfig');
+      if (!Array.isArray(config.options) || !config.options.length || config.options.length > 8
+          || config.options.some(name => typeof name !== 'string' || !OPTION.test(name))
+          || typeof config.key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(config.key))
+        throw invalid(source, 'permissions.argv.readOnlyConfig needs options and a plain configuration key.');
+      readOnlyConfig = Object.freeze({ options: Object.freeze([...new Set(config.options)]),
+        key: config.key, value: text(config.value, 64, source, 'permissions.argv.readOnlyConfig.value') });
+    }
+    argv = Object.freeze({ booleanNegation: row.booleanNegation === true,
+      attachedValueOptions: Object.freeze([...new Set(attached)]), ...(readOnlyConfig ? { readOnlyConfig } : {}) });
+  }
   let workerAgent;
   if (input.workerAgent !== undefined) {
     const row = input.workerAgent;
@@ -492,6 +517,7 @@ function validatePermissions(input, driver, source) {
     }
   }
   return Object.freeze({ aliases: Object.freeze(aliases), lead: Object.freeze(lead), openShellMinimumLevel,
+    ...(argv ? { argv } : {}),
     ...(workerMinimum ? { workerMinimum } : {}),
     ...(workerAgent ? { workerAgent } : {}),
     worker: Object.freeze(worker), remove: Object.freeze(remove) });

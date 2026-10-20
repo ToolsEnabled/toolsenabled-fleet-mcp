@@ -29,6 +29,10 @@ const INTERPRETERS = new Set(['node', 'nodejs', 'bun', 'deno', 'python', 'python
 const WRAPPERS = new Set(['sh', 'bash', 'dash', 'zsh', 'env', 'npx', 'npm', 'pnpm', 'yarn', 'bunx', 'uvx', 'timeout', 'nice', 'setsid', 'stdbuf']);
 const WRAPPER_SCRIPTS = new Set(['npx-cli.js', 'npm-cli.js', 'npx', 'npm']);
 const MAX_ANCESTORS = 6;
+const programName = value => {
+  const name = path.basename(String(value));
+  return process.platform === 'win32' ? name.toLowerCase().replace(/\.(?:exe|cmd|bat)$/, '') : name;
+};
 
 function isLevel(value) {
   return value === 1 || value === 2 || value === 3 || value === 4;
@@ -41,20 +45,44 @@ function narrowest(...levels) {
 }
 
 /** Options and flags in an argument list: `--opt value`, `--opt=value`, `--flag`. */
-function parseArgv(argv, aliases = {}) {
+function parseArgv(argv, aliases = {}, { booleanNegation = false, booleans = [] } = {}) {
   const options = new Map();
   const flags = new Set();
+  const booleanNames = new Set(booleans);
   const canonical = word => (Object.hasOwn(aliases, word) ? aliases[word] : word);
   for (let index = 0; index < argv.length; index += 1) {
     const word = argv[index];
-    if (typeof word !== 'string' || !word.startsWith('-') || word === '-' || word === '--') continue;
+    // Everything after the option terminator is positional input, even if it
+    // spells a permission flag. Prompt text must never grant worker authority.
+    if (word === '--') break;
+    if (typeof word !== 'string' || !word.startsWith('-') || word === '-') continue;
+    if (booleanNegation && word.startsWith('--no-')) {
+      const positive = canonical(`--${word.slice(5)}`);
+      if (booleanNames.has(positive)) {
+        flags.delete(positive);
+        options.set(positive, 'false');
+        continue;
+      }
+    }
     const equals = word.indexOf('=');
     if (equals > 0) {
-      options.set(canonical(word.slice(0, equals)), word.slice(equals + 1));
+      const name = canonical(word.slice(0, equals)), value = word.slice(equals + 1);
+      options.set(name, value);
+      if (booleanNegation && booleanNames.has(name)) {
+        flags.delete(name);
+        if (value === 'true') flags.add(name);
+      }
       continue;
     }
     const name = canonical(word);
     const next = argv[index + 1];
+    if (booleanNegation && booleanNames.has(name) && ['true', 'false'].includes(next)) {
+      flags.delete(name);
+      if (next === 'true') flags.add(name);
+      options.set(name, next);
+      index += 1;
+      continue;
+    }
     flags.add(name);
     if (typeof next === 'string' && !next.startsWith('-')) options.set(name, next);
   }
@@ -63,7 +91,42 @@ function parseArgv(argv, aliases = {}) {
 
 /** The level an agent's own command line starts it at, by its descriptor's rules. */
 function levelFromArgv(descriptor, argv) {
-  const { options, flags } = parseArgv(argv, descriptor.permissions.aliases);
+  // Some CLI short options accept attached values. Only normalize described
+  // value options; arbitrary prompt words never become options.
+  const syntax = descriptor.permissions.argv || {};
+  const words = argv.flatMap(word => (syntax.attachedValueOptions || []).some(option =>
+    word.startsWith(option) && word.length > option.length && word[option.length] !== '=')
+    ? [word.slice(0, 2), word.slice(2)] : [word]);
+  const { options, flags } = parseArgv(words, descriptor.permissions.aliases, {
+    booleanNegation: syntax.booleanNegation === true,
+    booleans: descriptor.permissions.lead.flatMap(rule =>
+      Object.entries(rule.when).filter(([, value]) => value === true).map(([name]) => name)),
+  });
+  // Explicit read-only config overrides can narrow inheritance. This is not
+  // a general TOML/settings parser, and no config override grants authority.
+  if (syntax.readOnlyConfig) {
+    const config = syntax.readOnlyConfig;
+    for (let index = 0; index < words.length && words[index] !== '--'; index += 1) {
+      const word = words[index];
+      const option = config.options.find(name => word === name || word.startsWith(name + '=')
+        || /^-[A-Za-z]$/.test(name) && word.startsWith(name) && word.length > name.length);
+      const value = option === word ? words[index + 1] : option ? word.slice(option.length).replace(/^=/, '') : null;
+      const assignment = typeof value === 'string' && /^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*([\s\S]*?)\s*$/.exec(value);
+      if (assignment && assignment[1] === config.key) {
+        // Recognize plain/raw strings and quoted TOML scalars with comments.
+        // More complicated TOML (including multiline or unsupported escapes)
+        // is conservatively read-only rather than guessed to permit edits.
+        const raw = assignment[2];
+        let scalar = null;
+        const basic = /^("(?:[^"\\]|\\.)*")\s*(?:#[^\r\n]*)?$/.exec(raw);
+        const literal = /^'([^']*)'\s*(?:#[^\r\n]*)?$/.exec(raw);
+        if (basic) { try { scalar = JSON.parse(basic[1]); } catch { /* narrower fallback */ } }
+        else if (literal) scalar = literal[1];
+        else if (/^[A-Za-z0-9_.-]+$/.test(raw)) scalar = raw;
+        if (scalar === null || scalar === config.value) return LEVEL.READ_ONLY;
+      }
+    }
+  }
   for (const rule of descriptor.permissions.lead) {
     const matches = Object.entries(rule.when).every(([option, value]) => (value === true
       ? flags.has(option)
@@ -76,7 +139,7 @@ function levelFromArgv(descriptor, argv) {
 /** Which described agent a process's argv belongs to, or null. */
 function agentOfArgv(registry, argv) {
   if (!Array.isArray(argv) || argv.length === 0) return null;
-  const first = path.basename(String(argv[0]));
+  const first = programName(argv[0]);
   let script = 1;
   // Node can relaunch a CLI with a heap limit before its entry point. Only
   // skip this numeric runtime option; searching arbitrary arguments could
@@ -85,7 +148,7 @@ function agentOfArgv(registry, argv) {
     while (/^--max[-_]old[-_]space[-_]size=\d+$/.test(argv[script] || '')) script += 1;
     if (/^--max[-_]old[-_]space[-_]size$/.test(argv[script] || '') && /^\d+$/.test(argv[script + 1] || '')) script += 2;
   }
-  const program = INTERPRETERS.has(first) && argv.length > script ? path.basename(String(argv[script])) : first;
+  const program = INTERPRETERS.has(first) && argv.length > script ? programName(argv[script]) : first;
   return registry.agents.find(agent => program === agent.command || program === `${agent.command}.js`) || null;
 }
 
@@ -102,7 +165,8 @@ function readParent(pid) {
 
 function isWrapper(argv) {
   if (!Array.isArray(argv) || argv.length === 0) return false;
-  const first = path.basename(String(argv[0]));
+  const first = programName(argv[0]);
+  if (process.platform === 'win32' && ['cmd', 'powershell', 'pwsh'].includes(first)) return true;
   if (WRAPPERS.has(first)) return true;
   return INTERPRETERS.has(first) && argv.length > 1 && WRAPPER_SCRIPTS.has(path.basename(String(argv[1])));
 }
@@ -112,6 +176,12 @@ function isWrapper(argv) {
    and the level its own flags start it at. Null when whatever started Fleet is
    not an agent (another MCP client, a test runner, a platform without /proc). */
 function findLead({ registry, startPid = process.ppid, read = readCmdline, parent = readParent } = {}) {
+  if (process.platform === 'win32' && read === readCmdline && parent === readParent) {
+    const rows = require('./windows-lead-processes').readWindowsLeadProcesses(startPid);
+    if (!rows) return null;
+    read = pid => rows.get(pid)?.argv;
+    parent = pid => rows.get(pid)?.parent;
+  }
   let pid = startPid;
   for (let step = 0; step < MAX_ANCESTORS && Number.isInteger(pid) && pid > 1; step += 1) {
     let argv;

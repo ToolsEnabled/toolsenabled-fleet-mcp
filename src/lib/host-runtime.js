@@ -19,8 +19,8 @@ function requireHostEnvironment(env = process.env) {
   if (env.OPENSHELL_SANDBOX === '1' || (env.TOOLSENABLED_RUNTIME_MODE && env.TOOLSENABLED_RUNTIME_MODE !== 'host')) {
     refuse('HOST_MODE_CONFLICT', 'Use the existing OpenShell entry for an OpenShell installation; host mode must be selected explicitly.');
   }
-  if (process.platform !== 'linux' || process.arch !== 'x64') {
-    refuse('HOST_PLATFORM_UNSUPPORTED', 'This host edition supports Linux x86_64 and WSL 2. macOS is not built yet.');
+  if (!['linux', 'win32'].includes(process.platform) || process.arch !== 'x64') {
+    refuse('HOST_PLATFORM_UNSUPPORTED', 'This host edition supports Linux and native Windows x86_64. macOS is not built yet.');
   }
 }
 
@@ -32,6 +32,7 @@ function absolute(value, label) {
 }
 
 function privateEntry(file, directory) {
+  if (process.platform === 'win32') return require('./windows-state-security').assertEntry(file, directory);
   const stat = fs.lstatSync(file);
   if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())
       || (stat.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
@@ -42,6 +43,7 @@ function privateEntry(file, directory) {
 }
 
 function noLinkedAncestors(file) {
+  if (process.platform === 'win32') return require('./windows-state-security').check('ancestors', file);
   let cursor = path.parse(file).root;
   for (const component of file.slice(cursor.length).split(path.sep).filter(Boolean)) {
     cursor = path.join(cursor, component);
@@ -56,6 +58,7 @@ function noLinkedAncestors(file) {
 }
 
 function checkPrivateTree(root) {
+  if (process.platform === 'win32') return require('./windows-state-security').assertTree(root);
   privateEntry(root, true);
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     const file = path.join(root, entry.name);
@@ -135,6 +138,7 @@ function validModelList(list, { setupKind = 'plugin', workers = true, providers,
 }
 
 function privateDirectory(file) {
+  if (process.platform === 'win32') { require('./windows-state-security').check('create', file); return; }
   fs.mkdirSync(file, { recursive: true, mode: 0o700 });
   privateEntry(file, true);
 }
@@ -233,7 +237,8 @@ function setupHost(config, { pluginRebindFrom = null, passEnv } = {}) {
     { installRoot: fs.realpathSync(INSTALL_ROOT), tier: config.tier, homedir: () => accountHome, allowHome: true });
   if (!resolvedChoice.ok) refuse(resolvedChoice.code, resolvedChoice.message);
   const relative = path.relative(accountHome, candidate);
-  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+  if (config.setupKind === 'plugin'
+      && (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
     refuse('HOST_WORKSPACE_OUTSIDE_HOME', 'Choose a workspace inside your account home so the mediated file tools can use it.');
   }
   const previous = machineRecord.readMachineRecord({ servicesRoot, adopt: false });
@@ -249,13 +254,14 @@ function setupHost(config, { pluginRebindFrom = null, passEnv } = {}) {
 
 function detectedProviderClis(env = process.env) {
   const folders = String(env.PATH || '').split(path.delimiter).filter(folder => path.isAbsolute(folder));
-  return SUBAGENT_PROVIDERS.filter(name => folders.some(folder => {
+  const extensions = process.platform === 'win32' ? ['', '.exe', '.cmd', '.bat'] : [''];
+  return SUBAGENT_PROVIDERS.filter(name => folders.some(folder => extensions.some(extension => {
     try {
-      const candidate = path.join(folder, name);
+      const candidate = path.join(folder, name + extension);
       fs.accessSync(candidate, fs.constants.X_OK);
       return fs.statSync(candidate).isFile();
     } catch { return false; }
-  }));
+  })));
 }
 
 function setupPluginHost({ stateRoot, workspace, tier = 'unrestricted', workers = false, providers: chosen = null, models = null, passEnv } = {}) {
@@ -295,7 +301,7 @@ function setupPluginHost({ stateRoot, workspace, tier = 'unrestricted', workers 
     require('./host-worker-prerequisite').requireHostWorkerNative();
   }
   noLinkedAncestors(stateRoot);
-  fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+  privateDirectory(stateRoot);
   noLinkedAncestors(stateRoot);
   checkPrivateTree(stateRoot);
   const configFile = path.join(stateRoot, 'host-mode.json');
@@ -341,15 +347,20 @@ function setupPluginHost({ stateRoot, workspace, tier = 'unrestricted', workers 
   try { fs.writeFileSync(fd, JSON.stringify(config) + '\n'); fs.fsyncSync(fd); }
   finally { fs.closeSync(fd); }
   if (previousConfig) privateEntry(configFile, false);
-  fs.renameSync(temporary, configFile);
+  if (process.platform === 'win32') {
+    privateEntry(temporary, false);
+    require('./windows-state-security').check('publish', configFile, temporary);
+  } else fs.renameSync(temporary, configFile);
   for (const name of fs.readdirSync(stateRoot)) {
     if (!/^\.host-mode-[0-9a-f]{24}\.tmp$/.test(name)) continue;
     const stale = path.join(stateRoot, name);
     privateEntry(stale, false);
     fs.unlinkSync(stale);
   }
-  const directory = fs.openSync(stateRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  if (process.platform !== 'win32') {
+    const directory = fs.openSync(stateRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  }
   return Object.freeze({ setup: 'ready', tier, workspace, workers, providers: chosen ? [...chosen] : providers,
     ...(workers && models ? { models: [...models] } : {}),
     pluginRebound: Boolean(previousConfig && previousConfig.installRoot !== INSTALL_ROOT) });

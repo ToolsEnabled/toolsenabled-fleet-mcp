@@ -411,6 +411,7 @@ function createOpenShellAgentHost({
   // The level the lead was started at (src/lib/agents/permission-level.js).
   // Every worker below it starts at that level or lower.
   leadLevel = () => require('./agents/permission-level').leadPermissionContext({ registry: KNOWN_AGENTS, env }),
+  unrestrictedFileRoot = false,
   continuationLedger = () => require('./owner-request-store').readAll({ kinds: ['T'], includeRemoved: true }),
   continuationEnabled = () => require('./runtime-policy').runtimePolicy().continuationEnabled,
 } = {}) {
@@ -1260,7 +1261,7 @@ function createOpenShellAgentHost({
       ...(node.role === 'worker' ? ['Do this task yourself. Start agents below you only when it has separate parts that should run in parallel.'] : []),
       // Saves each subagent searching its tools for a way to reach the files.
       ...(mode === 'host' && (node.surface?.names || []).includes('host.read_file')
-        ? [`Your project folder is ${workspaceRoot}. Fleet's host.read_file, host.list_dir, host.patch_file and host.write_file work inside it; a relative path starts there.`]
+        ? [`Your project folder is ${workspaceRoot}. Fleet's host.read_file, host.list_dir, host.patch_file and host.write_file use this folder for relative paths. Standalone unrestricted sessions can mediate permitted files across local folders and drives; confined and plugin sessions retain their workspace limits.`]
         : []),
       `When a turn ends, your last message is delivered to ${managerNameOf(node)} as your report, so end each turn with what it needs to know.`,
       'Reports and messages from agents below you arrive as new turns. To write to your manager or to an agent below you during a turn, use agent_comms.send_local'
@@ -1366,6 +1367,10 @@ function createOpenShellAgentHost({
         throw refusal('OPENSHELL_AGENT_START_UNAVAILABLE', `${node.displayName} was stopped while it was starting.`);
       }
       state.session = session;
+      // Native launchers may resolve a stricter sandbox than requested.
+      // Retain that effective ceiling for every subsequent descendant.
+      node.level = LEVELS.narrowest(node.level, session.level);
+      node.permissionContext = Object.freeze({ ...node.permissionContext, effectiveLevel: node.level });
       state.sessionModel = node.model;
       node.threadId = session.threadId;
       if (observation) launchPolicy.host.commitLaunch(observation.handle, session.threadId);
@@ -2090,6 +2095,20 @@ function createOpenShellAgentHost({
     if (op === 'comms.send') return sendLocal(request.args || {}, context);
     if (op === 'comms.roster') return roster(request.args || {}, context);
     if (op === 'whoami') return Object.freeze({ nodeId: node.nodeId, sessionId: node.sessionId, displayName: node.displayName, role: node.role });
+    if (op === 'file.access') {
+      const fullChain = [node, ...ancestorsOf(node)].every(member => {
+        const state = live.get(member.nodeId);
+        return running(member) && state?.session && member.level === 4
+          && state.launchParentSessionId === (member.parentNodeId ? byId(member.parentNodeId)?.sessionId : rootSessionId)
+          && (driverOf(member.provider) !== 'app-server'
+            || state.session.resolvedSandbox?.type === 'dangerFullAccess');
+      });
+      return Object.freeze({ nodeId: node.nodeId, sessionId: node.sessionId,
+        unrestricted: mode === 'host' && unrestrictedFileRoot === true && !closing
+          && permissionContext.verifiedParent === true && permissionContext.source === 'ancestor-cli'
+          && rootLevel === 4 && recordedTier === 'unrestricted'
+          && node.level === 4 && levelOf(node) === 4 && fullChain });
+    }
     throw refusal('OPENSHELL_TREE_LINK_INVALID', `The tree does not answer "${op}".`);
   }
 
@@ -2227,6 +2246,7 @@ function createOpenShellTreeClient({ socketPath, token, sessionId, ledgerContinu
     controlBoundary: body => call('boundary', body),
     resumeAssignmentVersion: 1,
     localCommsVersion: 1,
+    fileAccess: () => call('file.access'),
     localComms: Object.freeze({
       send: args => call('comms.send', { args }),
       roster: args => call('comms.roster', { args }),
