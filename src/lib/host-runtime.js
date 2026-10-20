@@ -194,6 +194,10 @@ function configureHost(config, { env = process.env, actor } = {}) {
   // The existing local-profile layout keeps service settings and engine state
   // in one private host container; no ambient XDG/profile setting can split it.
   const servicesRoot = path.join(config.stateRoot, 'services');
+  if (fleetV2) {
+    Object.assign(env, require('./fleet-v2-browser-settings').toolsEngineMcpEnvironment(config));
+    env.TOOLSENABLED_SETTINGS_PATH = env.TOOLSENABLED_SETTINGS;
+  }
   privateDirectory(servicesRoot);
   privateDirectory(env.TOOLSENABLED_STATE_ROOT);
   const marker = path.join(config.stateRoot, '.toolsenabled-local-profile.json');
@@ -377,6 +381,9 @@ function setupPluginHost({ stateRoot, workspace, tier = 'unrestricted', workers 
 
 async function serveHost(config, { actor, treeKey = null, enableRoleControl = false, allowedToolNames } = {}) {
   requireHostEnvironment();
+  const linkedInvocation = Boolean(process.env.TOOLSENABLED_HOST_NODE || process.env.TOOLSENABLED_HOST_TREE_SOCKET || process.env.TOOLSENABLED_HOST_SESSION);
+  if (config.profile === 'fleetV2' && !config.workers && linkedInvocation)
+    refuse('HOST_WORKER_PROFILE_INVALID', 'A linked worker cannot become a coordination-only root when workers are disabled.');
   if (treeKey && !config.workers) refuse('HOST_WORKERS_DISABLED', 'An existing tree selection requires the saved host worker opt-in.');
   if (config.workers) require('./host-worker-prerequisite').requireHostWorkerNative();
   if (enableRoleControl && (!config.workers || process.env.TOOLSENABLED_HOST_NODE
@@ -394,12 +401,17 @@ async function serveHost(config, { actor, treeKey = null, enableRoleControl = fa
   }
   process.stderr.write(`[toolsenabled] ${HOST_WARNING}\n`);
   if (!actor) process.stderr.write('[toolsenabled] HOST_ACTOR_UNBOUND: no --actor was supplied; ledger mutations require an explicit provider actor at startup.\n');
-  const options = { agentActor: actor || null, toolSummary: require('./host-descriptions'),
+  const options = { agentActor: actor || null, toolSummary: require(config.profile === 'fleetV2' && config.setupKind !== 'plugin' ? './fleet-v2-descriptions' : './host-descriptions'),
     ...(allowedToolNames === undefined ? {} : { allowedToolNames: Object.freeze([...allowedToolNames]) }),
     setupKind: config.setupKind,
     permissionSession: require('./permission-tier-policy').effectiveSessionFromRecord(
       require('./agents/permission-level').leadLevel({ registry: require('./agents/registry').activeRegistry() }).level, record),
-    workspaceRoots: record.workspaceRoots };
+    workspaceRoots: record.workspaceRoots,
+    ...(config.profile === 'fleetV2' && config.setupKind !== 'plugin' ? { resolveFolderScope: async () => {
+      const live = readHostConfig(config.stateRoot);
+      if (live.profile !== 'fleetV2' || live.setupKind === 'plugin') refuse('HOST_CONFIG_INVALID', 'The standalone parent folder policy is no longer available.');
+      return require('./fleet-folder-scope').normalize(live.fleetV2Scope);
+    } } : {}) };
   let workers;
   if (config.workers) {
     process.stderr.write(`[toolsenabled] ${WORKER_WARNING}\n`);

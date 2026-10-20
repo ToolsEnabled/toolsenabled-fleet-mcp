@@ -4,6 +4,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { createOpenShellAgentHost } = require('../src/lib/openshell-agent-host');
 function fixture(t, policy) {
+  const metrics = [];
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fv2-msg-'))), sessions = [];
   let taskRevision = 1, turnId = 0;
   const host = createOpenShellAgentHost({ mode: 'host', fleetV2: true, rootSessionId: 'owner', workspaceRoot: root,
@@ -14,6 +15,7 @@ function fixture(t, policy) {
     slotBounds: { maxChildren: 10, maxDepth: 5 }, continuationLedger: () => [], continuationEnabled: () => false,
     roleHooks: { lead: () => ({ roleId: 'manager', surface: { names: ['task.list'] } }), maxLevel: () => 2,
       admitChild: () => ({ roleId: 'worker', surface: { names: ['task.list'] } }), brief: ({ task }) => task, removeNativeTools: () => [] },
+    recordMetrics: row => metrics.push(row), statusIntroduction: () => 'FIXTURE MACHINE STATUS',
     getMessagePolicy: () => policy, getAssignment: () => ({ revision: taskRevision, taskRevision, text: `Task ${taskRevision}` }), recordAssignment() {},
     launcher: { async start(spec) {
       const session = { spec, threadId: spec.threadId || `thread-${sessions.length}`, turns: [], steers: [],
@@ -24,7 +26,7 @@ function fixture(t, policy) {
       sessions.push(session); return session;
     } } });
   t.after(async () => { await host.closeAll(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { host, sessions, policy, nextTask() { taskRevision++; }, spawn: () => host.spawn({ parentSessionId: 'owner', tier: 'fixture', brief: 'Initial' }),
+  return { host, sessions, policy, metrics, nextTask() { taskRevision++; }, spawn: () => host.spawn({ parentSessionId: 'owner', tier: 'fixture', brief: 'Initial' }),
     async boundary(worker, id) { const begin = await host.controlBoundary({ parentSessionId: worker.sessionId, phase: 'begin', requestId: id });
       return host.controlBoundary({ parentSessionId: worker.sessionId, phase: 'end', boundaryId: begin.boundaryId }); } };
 }
@@ -59,4 +61,21 @@ test('task reset setting preserves or replaces provider conversation only when t
   f.nextTask(); f.policy.resetAfterTask = true;
   await f.host.command({ action: 'resume-node', nodeId: worker.nodeId, parentSessionId: 'owner' });
   assert.equal(f.sessions[2].spec.threadId, null); assert.notEqual(f.sessions[2].threadId, firstThread);
+});
+
+test('native hooks include opted status and accept usage only for the current exact turn identity', async t => {
+  const f = fixture(t, { mode: 'instant', intervalMs: 1000, resetAfterTask: false });
+  const worker = await f.spawn(), session = f.sessions[0];
+  assert.match(session.turns[0].text, /FIXTURE MACHINE STATUS/);
+  session.spec.onEvent({ type: 'usage', threadId: session.threadId, turnId: 'stale', usage: { input_tokens: 99 } });
+  session.spec.onEvent({ type: 'usage', threadId: 'wrong-thread', turnId: session.turnId, usage: { input_tokens: 99 } });
+  assert.equal(f.metrics.filter(row => row.type === 'usage').length, 0);
+  session.spec.onEvent({ type: 'usage', threadId: session.threadId, turnId: session.turnId, usage: { input_tokens: 3 } });
+  assert.equal(f.metrics.filter(row => row.type === 'usage').length, 1);
+  session.finish();
+  assert.equal(f.metrics.filter(row => row.type === 'turn_completed').length, 1);
+  await f.host.command({ action: 'pause-node', nodeId: worker.nodeId, parentSessionId: 'owner' });
+  session.spec.onEvent({ type: 'usage', threadId: session.threadId, turnId: session.turnId, usage: { input_tokens: 99 } });
+  assert.equal(f.metrics.filter(row => row.type === 'usage').length, 1);
+  assert.equal(f.metrics.filter(row => row.type === 'closed').length, 1);
 });

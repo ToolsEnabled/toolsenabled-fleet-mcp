@@ -39,6 +39,10 @@ test('worker asks survive reconstruction, are discoverable and answer replay nev
   assert.equal((await control.request({ action: 'answer', id: 'question', answer: 'A', expectedRevision: 3 }, 'root')).replay, true);
   assert.equal(commands.length, 1);
   assert.match(control.assignment('builder').text, /Answer: A/);
+  await control.request({ action: 'archive-ask', id: 'question', expectedRevision: 3 }, 'root');
+  assert.equal(control.assignment('builder').text.includes('Answer: A'), false);
+  assert.equal((await control.request({ action: 'answer', id: 'question', answer: 'A', expectedRevision: 4 }, 'root')).replay, true);
+  await assert.rejects(control.request({ action: 'answer', id: 'question', answer: 'Changed', expectedRevision: 4 }, 'root'), { code: 'FLEET_ASK_ALREADY_ANSWERED' });
   await assert.rejects(control.request({ action: 'ask', id: 'question', question: 'Other?' }, 'worker-1'), { code: 'FLEET_CONTROL_WORKER_REQUIRED' });
 });
 test('concurrent revision edits have one winner; failed persistence restores old state', async () => {
@@ -53,7 +57,7 @@ test('settings import inventories exact pinned rows and refuses folder/provider 
   const settings = require('../src/lib/fleet-v2-settings');
   assert.equal(settings.inventory.entries.length, 103);
   assert.throws(() => settings.prepare({ 'capability.workspace_roots': ['/'] }), { code: 'FLEET_SETTING_EXCLUDED' });
-  assert.throws(() => settings.prepare({ 'agent.tool_approvals': false }), { code: 'FLEET_SETTING_EXCLUDED' });
+  assert.deepEqual(settings.prepare({ 'agent.tool_approvals': false }).stored, [['agent.tool_approvals', false]]);
   assert.throws(() => settings.prepare({ 'fleet.tree_width': -1 }), { code: 'FLEET_SETTINGS_INVALID' });
   assert.equal(settings.prepare({ 'fleet.review_cadence': settings.inventory.entries.find(row => row.id === 'fleet.review_cadence').original.default }).policies['fleet.review_cadence'], settings.inventory.entries.find(row => row.id === 'fleet.review_cadence').original.default);
 });
@@ -130,15 +134,19 @@ test('actual host startup routes durable asks, pause/edit/resume and scope refre
     const worker = await mode.host.spawn({ parentSessionId: mode.context.agentSessionId, tier: 'luna', role: 'worker', brief: 'Initial task' });
     const token = sessions[0].spec.linkToken;
     assert.equal(sessions[0].spec.serverEnv.TOOLSENABLED_TOOL_ALLOWLIST.includes('fleet.control'), true);
+    const waiting = mode.host.wait({ parentSessionId: mode.context.agentSessionId, timeoutSeconds: 1 });
     await backend.handleLink(token, 'fleet-control', { action: 'ask', id: 'target', question: 'Which target?' });
+    const notice = await waiting;
+    assert.equal(notice.timedOut, false);
+    assert.equal(notice.reports.some(report => report.kind === 'ask' && report.text.includes('target')), true);
     const pending = await mode.host.fleetControl({ action: 'read' }, mode.context.agentSessionId);
     assert.equal(pending.pendingAsks[0].question, 'Which target?');
     await mode.host.fleetControl({ action: 'answer', id: 'target', answer: 'Use current', expectedRevision: 2 }, mode.context.agentSessionId);
     assert.equal(sessions[0].closed, true);
     await assert.rejects(backend.handleLink(token, 'fleet-control', { action: 'read' }), { code: 'OPENSHELL_TREE_LINK_REFUSED' });
-    await mode.host.fleetControl({ action: 'task', nodeId: worker.nodeId, text: 'Replacement task', newTask: true, expectedRevision: 3 }, mode.context.agentSessionId);
+    await mode.host.fleetControl({ action: 'task', nodeId: worker.nodeId, text: 'Replacement task', expectedRevision: 3 }, mode.context.agentSessionId);
     await mode.host.fleetControl({ action: 'resume', nodeId: worker.nodeId, expectedRevision: 4 }, mode.context.agentSessionId);
-    assert.equal(sessions[1].spec.threadId, null);
+    assert.equal(sessions[1].spec.threadId, sessions[0].threadId);
     assert.match(sessions[1].turns[0].text, /Replacement task/);
     assert.match(sessions[1].turns[0].text, /Answer: Use current/);
     const secondToken = sessions[1].spec.linkToken;
@@ -148,6 +156,15 @@ test('actual host startup routes durable asks, pause/edit/resume and scope refre
     assert.deepEqual(scope.writeRoots, []);
     assert.equal(sessions[1].closed, true);
     await assert.rejects(backend.handleLink(secondToken, 'fleet-control', { action: 'read' }), { code: 'OPENSHELL_TREE_LINK_REFUSED' });
+    let latest = await mode.host.fleetControl({ action: 'read' }, mode.context.agentSessionId);
+    await mode.host.fleetControl({ action: 'permission-profiles', expectedRevision: latest.revision, profiles: { v: 1, activeProfileId: 'restricted', profiles: [
+      { id: 'restricted', name: 'Restricted', parentId: null, actions: { agentResume: 'automatic', 'fleet.control': 'disabled' } }
+    ] } }, mode.context.agentSessionId);
+    latest = await mode.host.fleetControl({ action: 'read' }, mode.context.agentSessionId);
+    await mode.host.fleetControl({ action: 'resume', nodeId: worker.nodeId, expectedRevision: latest.revision }, mode.context.agentSessionId);
+    assert.equal((await backend.handleLink(sessions[2].spec.linkToken, 'file.access')).permissionProfiles.activeProfileId, 'restricted');
+    await assert.rejects(backend.handleLink(sessions[2].spec.linkToken, 'fleet-control', { action: 'ask', id: 'hidden', question: 'Bypass?' }), { code: 'ACTION_PERMISSION_REQUIRED' });
+
   } finally {
     await mode.close(); require('../src/lib/tree-host-registry').clearTreeSpawnHost();
     fs.rmSync(scratch, { recursive: true, force: true }); fs.rmSync(runtime, { recursive: true, force: true });
@@ -172,4 +189,32 @@ test('a resume queued against the revision before a pause cannot restart the pau
   await pause;
   await assert.rejects(resume, { code: 'FLEET_CONTROL_STALE_REVISION' });
   assert.equal(document.nodes[0].state, 'paused'); assert.equal(commands.length, 1);
+});
+test('settings writer can clear the documented inheritable model default and rejects fractional fleet limits', () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'fv2-settings-'));
+  const file = path.join(folder, 'settings.json');
+  try {
+    require('../src/lib/openshell-settings-page').set([['model.local_agent_name', '']], { file });
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).values['model.local_agent_name'], '');
+    assert.throws(() => require('../src/lib/openshell-settings-page').set([['fleet.max_declared_agents', 1.5]], { file }), { code: 'SETTINGS_PAGE_INVALID' });
+  } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+});
+test('worker progress receipts do not reveal other workers tasks or asks', async () => {
+  const { control } = fixture();
+  await control.ensureTask('other', 'Private sibling assignment');
+  const receipt = await control.request({ action: 'progress', text: 'Own progress' }, 'worker-1');
+  assert.equal(receipt.task.progress, 'Own progress');
+  assert.equal(JSON.stringify(receipt).includes('Private sibling assignment'), false);
+  assert.equal(receipt.tasks, undefined); assert.equal(receipt.asks, undefined);
+});
+test('new task identity fences old ask replay and keeps the completed result history', async () => {
+  const { control, document } = fixture();
+  await control.request({ action: 'ask', id: 'target', question: 'Which target?' }, 'worker-1');
+  await control.request({ action: 'answer', id: 'target', answer: 'Old target', expectedRevision: 2 }, 'root');
+  await control.request({ action: 'task', nodeId: 'builder', newTask: true, text: 'New task', expectedRevision: 3 }, 'root');
+  assert.equal(control.assignment('builder').text.includes('Old target'), false);
+  document.nodes[0].state = 'running';
+  await assert.rejects(control.request({ action: 'ask', id: 'target', question: 'Which target?' }, 'worker-1'), { code: 'FLEET_ASK_REPLAY_CONFLICT' });
+  assert.equal((await control.request({ action: 'read' }, 'root')).taskHistory[0].text, 'Original');
 });

@@ -580,6 +580,7 @@ function resolveUnderscoreWireName(name, tools) {
 
 async function dispatch(message, options = {}) {
   validateRequest(message);
+  if (typeof options.resolvePermissionProfiles === 'function') await options.resolvePermissionProfiles();
   const requestedAllowedToolNames = snapshotAllowedToolNames(options.allowedToolNames);
   const scopeNames = childScopeToolNames(options.researchAccess);
   const allowedToolNames = scopeNames === undefined
@@ -619,7 +620,12 @@ async function dispatch(message, options = {}) {
     const result = {
       protocolVersion: SUPPORTED_PROTOCOLS.includes(requested) ? requested : SUPPORTED_PROTOCOLS[0],
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'toolsenabled', version: packageInfo.version,
+      serverInfo: { ...(typeof options.resolveFolderScope === 'function'
+        && process.env.TOOLSENABLED_RUNTIME_MODE === 'host'
+        && process.env.TOOLSENABLED_FLEET_PROFILE === 'fleetV2'
+        && process.env.TOOLSENABLED_HOST_SETUP_KIND !== 'plugin'
+        ? { name: 'fleetV2', version: require('../fleetV2.json').version }
+        : { name: 'toolsenabled', version: packageInfo.version }),
         ...(options.researchAccess ? { researchAccessVersion: 1 } : {}) }
     };
     const instructions = sessionInstructions(enumerationView, options);
@@ -1009,7 +1015,9 @@ function start(startOptions = {}) {
   // caller of processMessage in this process. Other transports must supply
   // their own private authenticated scope instead of sharing a fallback.
   const directFileScope = fileToolContext.createFileToolContext({ scopeKind: 'standalone-mcp' });
-  const hostFileAuthorization = typeof options.inheritedFileAccess === 'function'
+  const hostFileAuthorization = typeof options.resolveFolderScope === 'function'
+    ? require('./lib/host-file-access').createScoped({ fileToolContext: directFileScope, resolveFolderScope: options.resolveFolderScope })
+    : typeof options.inheritedFileAccess === 'function'
     ? require('./lib/host-file-access').createInherited({ fileToolContext: directFileScope, resolve: options.inheritedFileAccess })
     : require('./lib/host-file-access').create({ fileToolContext: directFileScope, permissionSession, observation });
   const lineOptions = { ...options, permissionSession, fileToolContext: directFileScope, hostFileAuthorization };

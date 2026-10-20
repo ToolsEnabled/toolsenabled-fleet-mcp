@@ -73,11 +73,12 @@ function installHost(value) {
     || typeof value.hasInheritedUserPermission !== 'function') throw new TypeError('Action permission host is incomplete.');
   host = value;
 }
-function current() {
+function current(principal) {
   let workingProfile = null;
   try { workingProfile = typeof host?.readWorkingProfile === 'function' ? host.readWorkingProfile() : null; }
   catch { workingProfile = null; }
-  return effective(host ? host.readSaved() : null, { workingProfile });
+  const saved = principal && typeof host?.readSavedForPrincipal === 'function' ? host.readSavedForPrincipal(principal) : host ? host.readSaved() : null;
+  return effective(saved, { workingProfile });
 }
 function actionMode(name) { return current().actions[name === 'agent.resume' ? 'agentResume' : name]; }
 function narrowTools(tools) {
@@ -90,7 +91,7 @@ function narrowTools(tools) {
   });
 }
 function assertAction(entry, principal) {
-  const saved = current();
+  const saved = current(principal);
   if (saved.functions !== null && !saved.functions.includes(entry.name)) throw Object.assign(new Error('This function is no longer selected in the saved permission profile.'), {
     code: 'ACTION_PERMISSION_REQUIRED',
   });

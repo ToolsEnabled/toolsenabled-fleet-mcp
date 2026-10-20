@@ -101,9 +101,10 @@ function workerToken(env, config) {
     return token;
   } finally { fs.closeSync(fd); }
 }
-function actionPermissions() {
+function actionPermissions({ readSaved, readSavedForPrincipal } = {}) {
   require('./action-permission-profiles').installHost({
-    readSaved: () => ({ v: 1, activeProfileId: 'default', profiles: [{ id: 'default', name: 'Default', parentId: null, actions: { agentResume: 'automatic' } }] }),
+    readSaved: readSaved || (() => ({ v: 1, activeProfileId: 'default', profiles: [{ id: 'default', name: 'Default', parentId: null, actions: { agentResume: 'automatic' } }] })),
+    ...(readSavedForPrincipal ? { readSavedForPrincipal } : {}),
     isDirectUserTurn: () => false, hasInheritedUserPermission: () => false,
   });
 }
@@ -147,7 +148,14 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
       ? { ...host, fleetControlVersion: 1 } : host;
     const confined = confinedTreeHost(workerHost, config);
     installTreeSpawnHost(confined);
-    actionPermissions();
+    let permissionProfiles = { v: 1, activeProfileId: 'default', profiles: [{ id: 'default', name: 'Default', parentId: null, actions: { agentResume: 'automatic' } }] };
+    const resolvePermissionProfiles = async () => {
+      const result = await host.fileAccess();
+      if (result?.nodeId !== nodeId || result?.sessionId !== sessionId) throw refusal('HOST_WORKER_LINK_INVALID', 'Permission profiles belong to another session.');
+      permissionProfiles = require('./action-permission-profiles').normalize(result.permissionProfiles);
+      return permissionProfiles;
+    };
+    actionPermissions(clean.TOOLSENABLED_FLEET_PROFILE === 'fleetV2' ? { readSaved: () => permissionProfiles } : {});
     const resolveFolderScope = async () => {
       const result = await host.fileAccess();
       if (result?.nodeId !== nodeId || result?.sessionId !== sessionId)
@@ -165,7 +173,7 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
     };
     return Object.freeze({ host: confined, context: Object.freeze({
       ...context({ agentId: nodeId, sessionId, roleId, surface, config }),
-      inheritedFileAccess, ...(clean.TOOLSENABLED_FLEET_PROFILE === 'fleetV2' ? { resolveFolderScope } : {}) }),
+      inheritedFileAccess, ...(clean.TOOLSENABLED_FLEET_PROFILE === 'fleetV2' ? { resolveFolderScope, resolvePermissionProfiles } : {}) }),
       ready: Promise.resolve(), close: async () => {} });
   }
   const agentId = actor && ID.test(actor) ? actor : 'host-owner';
@@ -187,6 +195,7 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
   catch (error) { tree.release(); throw error; }
   let host;
   let control;
+  let observability;
   let scopeRefresh;
   let resources;
   let currentFolderScope = config.fleetV2Scope;
@@ -224,12 +233,13 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
       ? { limits: () => { const live = require('./host-runtime').currentPluginLimits();
         return limitsFor(live && live.workers ? live : config); } }
       : config.providers || config.models ? { limits: limitsFor(config) } : {};
+    if (fleetV2) observability = require('./fleet-v2-observability').createObservability({ document: tree.document, persist: document => store.saveTree(tree.treeFile, document), laneId: tree.document.treeKey });
     if (fleetV2) control = require('./fleet-v2-control').createFleetControl({
-      document: tree.document, persist: document => store.saveTree(tree.treeFile, document), rootSessionId, resources, inspect: () => host.list(),
+      document: tree.document, persist: document => store.saveTree(tree.treeFile, document), rootSessionId, resources, observability, onAsk: ask => host.notifyControlAsk(ask), inspect: () => host.list(),
       command: request => host.command(request), settings: (changes, options) => options?.import ? require('./fleet-v2-settings').importSettings(changes) : require('./fleet-v2-settings').set(changes),
     });
     host = createHost({ fleetV2, ...(fleetV2 ? { folderScope: config.fleetV2Scope } : {}),
-      ...(control ? { getAssignment: control.assignment, recordAssignment: control.ensureTask, controlRequest: control.request } : {}), mode: 'host', enableRoleControl, rootSessionId, workspaceRoot: folder, env: clean, launcher, recordedTier: config.tier || 'unrestricted',
+      ...(control ? { getAssignment: control.assignment, recordAssignment: control.ensureTask, controlRequest: control.request, getPermissionProfiles: control.permissionProfiles, statusIntroduction: observability.introduction, recordMetrics: observability.record } : {}), mode: 'host', enableRoleControl, rootSessionId, workspaceRoot: folder, env: clean, launcher, recordedTier: config.tier || 'unrestricted',
       unrestrictedFileRoot: config.setupKind !== 'plugin' && config.tier === 'unrestricted', ...limits,
       root, document: tree.document, persist: document => store.saveTree(tree.treeFile, document), nodeFolder: tree.nodeFolder,
       codexEndpoint: () => null });
@@ -267,7 +277,7 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
     command: async request => { await ready; if (scopeRefresh) await scopeRefresh.refresh(); return host.command(request); },
     wait: async request => { await ready; return host.wait(request); } });
   const confined = confinedTreeHost(gated, config);
-  try { installTreeSpawnHost(confined); actionPermissions(); }
+  try { installTreeSpawnHost(confined); actionPermissions(control ? { readSavedForPrincipal: principal => principal.sessionId === rootSessionId ? { v: 1, activeProfileId: 'default', profiles: [{ id: 'default', name: 'Default', parentId: null, actions: { agentResume: 'automatic' } }] } : control.permissionProfiles() } : {}); }
   catch (error) {
     ready.then(cleanup, cleanup).catch(() => {});
     tree.release();

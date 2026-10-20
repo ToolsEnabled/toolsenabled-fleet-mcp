@@ -17,8 +17,9 @@ function prepare(changes) {
     }
     const entry = registry.byId.get(id);
     if (!entry || row?.disposition === 'excluded') fail('FLEET_SETTING_EXCLUDED', row?.reason || `Unknown setting ${id}.`);
-    if (entry.control === 'readback' || ['capability.tier', 'capability.workspace_roots', 'agent.tool_approvals'].includes(id))
-      fail('FLEET_SETTING_AUTHORITY_REFUSED', 'Settings cannot change the parent folder scope or FleetV2 provider bypass policy.');
+    if (entry.control === 'readback' || ['capability.tier', 'capability.workspace_roots'].includes(id))
+      fail('FLEET_SETTING_AUTHORITY_REFUSED', 'Settings cannot change the parent folder scope or the installation permission boundary.');
+    if (id === 'agent.status_injection_overrides' && !require('./fleet-v2-observability').validOverrides(value)) fail('FLEET_SETTINGS_INVALID', 'Use unique exact agent, lane or host status overrides with boolean enabled values.');
     const reason = require('./settings').validationFailure(entry, value);
     if (reason) fail('FLEET_SETTINGS_INVALID', reason);
     stored.push([id, value]);
@@ -29,9 +30,10 @@ function prepareImport(changes) {
   if (!changes || typeof changes !== 'object' || Array.isArray(changes) || Object.keys(changes).length > 512)
     fail('FLEET_SETTINGS_INVALID', 'Import a bounded map of old setting ids and values, excluding credentials.');
   const included = {}, skipped = [];
-  let resources;
+  let resources, permissionProfiles;
   const known = new Set(require('./settings-registry').loadRegistry().byId.keys());
   for (const [id, value] of Object.entries(changes)) {
+    if (id === 'mc.action-permissions.v1') { permissionProfiles = require('./action-permission-profiles').normalize(value); continue; }
     if (id === 'mc.resources.v1') {
       let policy;
       try { policy = typeof value === 'string' ? JSON.parse(value) : value; } catch { fail('FLEET_RESOURCE_POLICY_INVALID', 'The imported resource policy is not valid JSON.'); }
@@ -42,11 +44,11 @@ function prepareImport(changes) {
     included[id] = value;
   }
   if (Object.keys(included).length) prepare(included);
-  return { included, skipped, ...(resources ? { resources } : {}) };
+  return { included, skipped, ...(resources ? { resources } : {}), ...(permissionProfiles ? { permissionProfiles } : {}) };
 }
 function importSettings(changes) {
-  const { included, skipped, resources } = prepareImport(changes);
-  return { ...(Object.keys(included).length ? set(included) : { policies: {} }), skipped, ...(resources ? { resources } : {}) };
+  const { included, skipped, resources, permissionProfiles } = prepareImport(changes);
+  return { ...(Object.keys(included).length ? set(included) : { policies: {} }), skipped, ...(resources ? { resources } : {}), ...(permissionProfiles ? { permissionProfiles } : {}) };
 }
 function set(changes) {
   const { stored, policies } = prepare(changes);

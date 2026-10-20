@@ -62,6 +62,8 @@ function defaultProvenance() {
 }
 
 function validationFailure(entry, raw) {
+  if (entry.id === 'agent.status_injection_overrides' && !require('./fleet-v2-observability').validOverrides(raw))
+    return 'Use unique exact agent, lane or host status overrides with boolean enabled values.';
   if (entry.id === 'fleet.max_declared_agents' && (!Number.isSafeInteger(raw) || raw < 0)) {
     return 'The declared agent limit must be a non-negative whole number; 0 removes the agent-count limit.';
   }

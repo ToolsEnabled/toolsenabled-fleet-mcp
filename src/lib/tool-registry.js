@@ -879,11 +879,12 @@ function systemStatus(_args = {}, dependencies = {}) {
 // set by permission level and by whether workers are enabled.
 const CORE_TOOLS = [
   define('fleet.control', 'FleetV2 durable coordination: read tasks/rules/pending asks, file worker asks, and root-only revision checked edits, answers, settings and lifecycle.', schema({
-    action: { type: 'string', enum: ['read', 'ask', 'task', 'rule', 'answer', 'pause', 'stop', 'resume', 'remove', 'settings', 'settings-read', 'progress', 'complete', 'import-settings', 'resources', 'resources-read', 'resource-advice', 'archive-ask'] },
+    action: { type: 'string', enum: ['read', 'ask', 'task', 'rule', 'answer', 'pause', 'stop', 'resume', 'remove', 'settings', 'settings-read', 'progress', 'complete', 'import-settings', 'resources', 'resources-read', 'resource-advice', 'archive-ask', 'permission-profiles', 'permission-profiles-read', 'metrics-read'] },
     expectedRevision: { type: 'integer', minimum: 0 }, nodeId: { type: 'string', minLength: 1, maxLength: 64 },
     id: { type: 'string', minLength: 1, maxLength: 64 }, text: { type: 'string', minLength: 1, maxLength: 12000 },
     question: { type: 'string', minLength: 1, maxLength: 4000 }, answer: { type: 'string', minLength: 1, maxLength: 4000 },
-    policy: { type: 'object', additionalProperties: true }, provider: { type: 'string', maxLength: 64 }, decision: { type: 'string', enum: ['allow', 'hold'] }, launches: { type: 'integer', minimum: 0, maximum: 64 }, expiresAtMs: { type: 'number' }, reason: { type: 'string', maxLength: 2000 },
+    offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 1000 },
+    profiles: { type: 'object', additionalProperties: true }, policy: { type: 'object', additionalProperties: true }, provider: { type: 'string', maxLength: 64 }, decision: { type: 'string', enum: ['allow', 'hold'] }, launches: { type: 'integer', minimum: 0, maximum: 64 }, expiresAtMs: { type: 'number' }, reason: { type: 'string', maxLength: 2000 },
     active: { type: 'boolean' }, newTask: { type: 'boolean' }, changes: { type: 'object', additionalProperties: true }
   }, ['action']), (args, context = {}) => {
     const host = require('./tree-host-registry').treeSpawnHost();

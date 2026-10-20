@@ -95,7 +95,7 @@ function set(changes, { reg = registry(), file = require('./settings').resolveVa
     const entry = reg.byId.get(id);
     if (!entry) throw refuse('SETTINGS_PAGE_UNKNOWN', `There is no setting "${id}".`);
     if (entry.control === 'readback') throw refuse('SETTINGS_PAGE_READ_ONLY', `"${id}" is read-only here.`);
-    const reason = validateSettingValue(entry, value);
+    const reason = require('./settings').validationFailure(entry, value);
     if (reason) throw refuse('SETTINGS_PAGE_INVALID', reason);
   }
   if (process.env.TOOLSENABLED_FLEET_LOCK_FD !== undefined) require('./openshell-lifecycle-lock').markMutation();

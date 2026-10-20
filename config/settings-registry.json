@@ -43,7 +43,11 @@
     "tools.credential_check_interval_seconds": "Repeat Windows vault presence checks",
     "tools.policy_enforcement": "Require scoped policy decisions",
     "agent.persistent_continuation": "Continue unfinished ledger work",
-    "agent.task_difficulty_enabled": "Grade task difficulty"
+    "agent.task_difficulty_enabled": "Grade task difficulty",
+    "browser.agent_chrome_session_transfer": "Allow authorized Chrome transfer to a hidden browser",
+    "agent.status_injection": "agent.status_injection",
+    "metrics.local_history": "metrics.local_history",
+    "agent.status_injection_overrides": "agent.status_injection_overrides"
   },
   "entries": [
     {
@@ -369,7 +373,7 @@
         "Automatic follow-up turns can consume account quota while unfinished work remains."
       ],
       "derivedFrom": "built-in product policy",
-      "enforcedBy": "src/lib/ledger-continuation-controller.js and src/lib/openshell-agent-host.js schedule explicitly enrolled standalone worker turns through existing sessions; no provider permission or account settings are changed",
+      "enforcedBy": "src/lib/runtime-policy.js reads this choice; src/lib/ledger-continuation-controller.js and src/lib/openshell-agent-host.js schedule explicitly enrolled standalone worker turns through existing sessions; no provider permission or account settings are changed.",
       "applies": "next-call"
     },
     {
@@ -608,7 +612,7 @@
         "withoutIt": "The setting stays on and saves. Model requests stop and tell you the service could not be reached; nothing is silently retried elsewhere and no other provider is substituted."
       },
       "derivedFrom": "built-in product policy",
-      "enforcedBy": "src/lib/providers/customer-model.js",
+      "enforcedBy": "src/lib/local-model-options.js resolves configured local agent/model choices; src/lib/providers/local-node-runtime.js uses the selected provider endpoint for local-node requests.",
       "options": [
         "Not configured",
         "OpenAI compatible",
@@ -629,7 +633,7 @@
         "Everything in a prompt goes to this address. An address typed wrongly can send your prompts somewhere you did not intend."
       ],
       "derivedFrom": "built-in product policy",
-      "enforcedBy": "src/lib/providers/customer-model.js",
+      "enforcedBy": "src/lib/local-model-options.js resolves configured local agent/model choices; src/lib/providers/local-node-runtime.js uses the selected provider endpoint for local-node requests.",
       "applies": "next-call"
     },
     {
@@ -646,7 +650,7 @@
         "Very little. If the provider does not recognise the name it says the request failed; it is never quietly answered by a different model."
       ],
       "derivedFrom": "built-in product policy",
-      "enforcedBy": "src/lib/providers/customer-model.js"
+      "enforcedBy": "src/lib/local-model-options.js resolves configured local agent/model choices; src/lib/providers/local-node-runtime.js uses the selected provider endpoint for local-node requests."
     },
     {
       "id": "model.local_agent_name",
@@ -999,6 +1003,74 @@
       ],
       "derivedFrom": "built-in product policy",
       "enforcedBy": "src/lib/fleet-v2-message-policy.js reads this control; src/lib/openshell-agent-host.js enforces queue timing and task session reset in the standalone FleetV2 profile."
+    },
+    {
+      "id": "browser.agent_chrome_session_transfer",
+      "section": "F",
+      "depth": 1,
+      "control": "toggle",
+      "default": true,
+      "consequence": "Make explicit user-authorized Chrome signed-in session transfer available to the separate hidden-browser ToolsEngine MCP. Off refuses before connecting to the source browser; each transfer still needs its own user authorization.",
+      "capabilities": [
+        "Transfer supported signed-in Chrome site state into an owned hidden browser after explicit user authorization."
+      ],
+      "risks": [
+        "Authorized site state is copied to the owned hidden browser; supported state and source connection limitations still apply."
+      ],
+      "derivedFrom": "Standalone FleetV2 browser capability policy; shared sparse values file with ToolsEngine.",
+      "enforcedBy": "Separate ToolsEngine MCP toolsengine/src/chrome-session.js checks the shared setting before source connection; src/lib/fleet-v2-browser-settings.js supplies registration environment from the Fleet state root.",
+      "applies": "next-call"
+    },
+    {
+      "id": "agent.status_injection",
+      "section": "F",
+      "depth": 1,
+      "control": "toggle",
+      "default": false,
+      "consequence": "Off, no machine status is collected for agent prompts. On, a compact current block with CPU, memory, state and audit health, owner-request capture backlog, and any available usage or quota measurements is added to automatic onboarding prompts. Unknown measurements stay visibly unknown, and account identities or credentials are never included.",
+      "capabilities": [
+        "Agents can see this computer\u2019s current state and adjust, instead of planning as if nothing else were running."
+      ],
+      "risks": [
+        "That state block is added to prompts, so whatever the model provider receives now includes measurements about this machine."
+      ],
+      "derivedFrom": "built-in product policy",
+      "enforcedBy": "src/lib/fleet-v2-observability.js; src/lib/host-agent-mode.js; src/lib/openshell-agent-host.js",
+      "applies": "next-session"
+    },
+    {
+      "id": "metrics.local_history",
+      "section": "F",
+      "depth": 1,
+      "control": "toggle",
+      "default": true,
+      "consequence": "Keep a private record of agent runs and token use on this computer so the Metrics page can show them, even while Signed activity audit is off. Off, with Signed activity audit also off, records nothing new and the Metrics page shows no saved history. Records already saved are kept. This record is separate from the signed activity ledger.",
+      "capabilities": [
+        "Show runs, outcomes and token use on the Metrics page without turning on Signed activity audit."
+      ],
+      "risks": [
+        "The record grows with each run and turn and stays on this computer until you remove local data."
+      ],
+      "derivedFrom": "Product default: Metrics history is kept without the signed audit, and is on by default.",
+      "enforcedBy": "src/lib/fleet-v2-observability.js; src/lib/host-agent-mode.js; src/lib/openshell-agent-host.js",
+      "applies": "next-call"
+    },
+    {
+      "id": "agent.status_injection_overrides",
+      "section": "F",
+      "depth": 3,
+      "control": "list",
+      "default": [],
+      "consequence": "Optionally override the shared choice for one exact agent, lane, or computer. Each item is {kind: agent|lane|host, id: the exact node id, enabled: true|false}. Agent overrides win over lane overrides, which win over computer overrides. A missing or malformed shared setting or override list turns injection off rather than treating absence as consent.",
+      "capabilities": [
+        "Lets one agent, lane or computer differ from the shared choice above."
+      ],
+      "risks": [
+        "An override you set once and forget quietly outranks the shared setting, which is the first place anyone will look."
+      ],
+      "derivedFrom": "built-in product policy",
+      "enforcedBy": "src/lib/fleet-v2-observability.js; src/lib/host-agent-mode.js; src/lib/openshell-agent-host.js",
+      "applies": "next-session"
     }
   ]
 }
