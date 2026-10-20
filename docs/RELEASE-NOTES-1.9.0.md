@@ -84,9 +84,10 @@ The public source is the archive published beside each release.
 
 ## Known limits
 
-- For Gemini CLI, use your own Gemini API key, Vertex AI, or a Gemini Code
-  Assist Standard or Enterprise sign-in in `gemini`. Google ended Login with
-  Google for individual plans in Gemini CLI on 2026-06-18.
+- Correction (2026-10-20): the earlier blanket claim that individual Google
+  sign-in ended on June 18, 2026 was too broad. Google currently documents
+  personal Gemini CLI sign-in; Fleet worker qualification and reported CLI
+  eligibility failures are separate. See [Gemini authentication](GEMINI-AUTH.md).
 - OpenCode workers need a level-4 lead, and their inherited level must remain 4
   after role limits. At lower levels their tool requests would need prompts a
   worker cannot show, so Fleet refuses them. OpenCode can still be a lead.

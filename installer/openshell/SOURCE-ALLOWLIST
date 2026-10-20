@@ -16,6 +16,7 @@ config/capability-index.json
 config/model-endpoints.json
 config/settings-registry.json
 config/toolsenabled.policy.json
+docs/GEMINI-AUTH.md
 docs/HOST-ROLE-CONTROL.md
 docs/LEDGER-CONTINUATION.md
 docs/PLUGIN-POLICY.md
