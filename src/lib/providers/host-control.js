@@ -542,6 +542,8 @@ function checkHostWorkspaceBoundary(candidatePath) {
 }
 
 function defaultHostListDirectory() {
+  const ambientDirectory = require('../host-file-access').workingDirectory();
+  if (ambientDirectory) return ambientDirectory;
   if (process.env.TOOLSENABLED_RUNTIME_MODE !== 'host') return HOME;
   try {
     const records = require('../setup/machine-record');

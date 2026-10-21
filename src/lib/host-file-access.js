@@ -38,6 +38,15 @@ function createScoped({ fileToolContext, resolveFolderScope, env = process.env }
   return authorization;
 }
 
+function createAmbient({ fileToolContext, resolveAmbientAccess, cwd, env = process.env } = {}) {
+  if (env.TOOLSENABLED_RUNTIME_MODE !== 'host' || env.TOOLSENABLED_HOST_SETUP_KIND === 'plugin'
+      || env.TOOLSENABLED_FLEET_PROFILE !== 'fleetV2' || typeof resolveAmbientAccess !== 'function') return undefined;
+  require('./file-tool-context').requireFileToolContext(fileToolContext);
+  const authorization = Object.freeze({});
+  authorizations.set(authorization, { fileToolContext, resolveAmbientAccess, cwd: require('node:fs').realpathSync(cwd), admitted: false });
+  return authorization;
+}
+
 function scopeKey(value) {
   return JSON.stringify([value.revision, value.source, value.readAll === true, value.readRoots, value.writeRoots]);
 }
@@ -49,6 +58,13 @@ function bound(context) {
 
 async function prepare(context) {
   const authorization = bound(context);
+  if (authorization?.resolveAmbientAccess && context?.setupKind !== 'plugin' && !context?.researchAccess) {
+    authorization.admitted = await authorization.resolveAmbientAccess() === true;
+    if (!authorization.admitted) throw Object.assign(new Error('The ambient standalone session is no longer available.'), { code: 'FLEET_AMBIENT_ACCESS_REVOKED' });
+    const records = require('./setup/machine-record');
+    const record = records.readMachineRecord({ servicesRoot: records.resolveServicesRoot({}), adopt: false });
+    return { ...context, permissionSession: require('./permission-tier-policy').effectiveSessionFromRecord(4, record) };
+  }
   if (authorization?.resolveFolderScope && context?.setupKind !== 'plugin' && !context?.researchAccess) {
     const folderScope = require('./fleet-folder-scope').normalize(await authorization.resolveFolderScope());
     const records = require('./setup/machine-record');
@@ -76,7 +92,7 @@ function run(context, callback) {
     && session.origin === 'local' && session.tier === 'full'
     // Turning byte coordination off must not disable the independent V2
     // folder policy (including read-only protection inside the workspace).
-    && (active.resolveFolderScope || require('./providers/host-control').hostByteMediationEnabled())
+    && (active.resolveAmbientAccess || active.resolveFolderScope || require('./providers/host-control').hostByteMediationEnabled())
     && !context?.researchAccess && context?.setupKind !== 'plugin' ? active : null, callback);
 }
 
@@ -101,7 +117,7 @@ function assertCurrent() {
     throw Object.assign(new Error('The parent folder policy changed during this operation. Read again under its current revision.'),
       { code: 'FLEET_FOLDER_SCOPE_CHANGED' });
   }
-  if (authorization.resolve && !authorization.admitted) {
+  if ((authorization.resolve || authorization.resolveAmbientAccess) && !authorization.admitted) {
     throw Object.assign(new Error('The worker no longer inherits unrestricted file access.'), { code: 'HOST_FILE_ACCESS_REVOKED' });
   }
 }
@@ -117,7 +133,14 @@ async function refresh() {
     } catch (error) { authorization.revoked = true; throw error; }
   }
   if (authorization.resolve) authorization.admitted = await authorization.resolve() === true;
+  if (authorization.resolveAmbientAccess) authorization.admitted = await authorization.resolveAmbientAccess() === true;
   assertCurrent();
+}
+
+function workingDirectory() {
+  const authorization = scope.getStore();
+  if (!authorization?.resolveAmbientAccess) return null;
+  assertCurrent(); return authorization.cwd;
 }
 
 function assertPath(candidate, { forWrite = false } = {}) {
@@ -155,4 +178,4 @@ function resourcePath(value, { platform = process.platform } = {}) {
   return normalized;
 }
 
-module.exports = { create, createInherited, createScoped, prepare, run, unrestricted, assertCurrent, refresh, assertPath, resourcePath };
+module.exports = { create, createInherited, createScoped, createAmbient, workingDirectory, prepare, run, unrestricted, assertCurrent, refresh, assertPath, resourcePath };

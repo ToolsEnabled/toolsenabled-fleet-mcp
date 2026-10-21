@@ -620,7 +620,7 @@ async function dispatch(message, options = {}) {
     const result = {
       protocolVersion: SUPPORTED_PROTOCOLS.includes(requested) ? requested : SUPPORTED_PROTOCOLS[0],
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { ...(typeof options.resolveFolderScope === 'function'
+      serverInfo: { ...((typeof options.resolveFolderScope === 'function' || typeof options.resolveAmbientAccess === 'function')
         && process.env.TOOLSENABLED_RUNTIME_MODE === 'host'
         && process.env.TOOLSENABLED_FLEET_PROFILE === 'fleetV2'
         && process.env.TOOLSENABLED_HOST_SETUP_KIND !== 'plugin'
@@ -975,7 +975,12 @@ function start(startOptions = {}) {
    * that holds the tree and its workers, or one worker's own server bound to
    * that root. The sandbox, not this process, is the boundary in that mode.
    * Off everywhere else, so the desktop stdio broker is unchanged. */
-  const openShell = require('./lib/openshell-agent-host').startOpenShellAgentMode();
+  // An explicitly composed ambient host may itself run inside OpenShell.
+  // Its external sandbox flags remain intact; they do not select a second tree.
+  const ambientHost = typeof launchOptions.resolveAmbientAccess === 'function'
+    && process.env.TOOLSENABLED_RUNTIME_MODE === 'host' && process.env.TOOLSENABLED_FLEET_PROFILE === 'fleetV2'
+    && process.env.TOOLSENABLED_HOST_SETUP_KIND !== 'plugin';
+  const openShell = ambientHost ? null : require('./lib/openshell-agent-host').startOpenShellAgentMode();
   const options = openShell === null ? launchOptions : Object.freeze({ ...launchOptions, ...openShell.context });
   if (openShell !== null) {
     /* A root that is told to end still stops its workers first: they lead
@@ -1015,7 +1020,9 @@ function start(startOptions = {}) {
   // caller of processMessage in this process. Other transports must supply
   // their own private authenticated scope instead of sharing a fallback.
   const directFileScope = fileToolContext.createFileToolContext({ scopeKind: 'standalone-mcp' });
-  const hostFileAuthorization = typeof options.resolveFolderScope === 'function'
+  const hostFileAuthorization = typeof options.resolveAmbientAccess === 'function'
+    ? require('./lib/host-file-access').createAmbient({ fileToolContext: directFileScope, resolveAmbientAccess: options.resolveAmbientAccess, cwd: process.cwd() })
+    : typeof options.resolveFolderScope === 'function'
     ? require('./lib/host-file-access').createScoped({ fileToolContext: directFileScope, resolveFolderScope: options.resolveFolderScope })
     : typeof options.inheritedFileAccess === 'function'
     ? require('./lib/host-file-access').createInherited({ fileToolContext: directFileScope, resolve: options.inheritedFileAccess })

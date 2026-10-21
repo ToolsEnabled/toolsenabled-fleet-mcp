@@ -1723,6 +1723,17 @@ function registeredTools({ allowedToolNames, permissionSession, agentRole } = {}
       ? TOOL_REGISTRY.filter(entry => allowlist.some(selector => selectorMatchesTool(selector, entry.name)))
       : TOOL_REGISTRY;
   }
+  if (process.env.TOOLSENABLED_RUNTIME_MODE === 'host' && process.env.TOOLSENABLED_FLEET_PROFILE === 'fleetV2'
+      && process.env.TOOLSENABLED_FLEET_SECURITY === 'inherited-environment' && process.env.TOOLSENABLED_HOST_SETUP_KIND !== 'plugin') {
+    tools = tools.map(entry => {
+      if (!['host.read_file', 'host.write_file', 'host.patch_file', 'host.list_dir'].includes(entry.name)) return entry;
+      const describe = schema => schema?.properties?.path ? { ...schema, properties: { ...schema.properties,
+        path: { ...schema.properties.path, description: 'Absolute OS-accessible path, or a path relative to this session starting working directory. Omit for that directory when allowed.' } } } : schema;
+      return { ...entry, description: entry.description.replaceAll('anywhere in the owner profile tree', 'at an OS-accessible path')
+        .replaceAll('inside the owner profile tree', 'at an OS-accessible path').replaceAll('profile root', 'starting working directory'),
+        inputSchema: describe(entry.inputSchema), baseInputSchema: describe(entry.baseInputSchema) };
+    });
+  }
   const fleetHost = require('./tree-host-registry').treeSpawnHost();
   tools = tools.filter(entry => entry.name !== 'fleet.control' || fleetHost?.fleetControlVersion === 1);
   if (fleetHost?.fleetOrchestrator === true) tools = tools.filter(entry => entry.name !== 'agent_comms.send_local');

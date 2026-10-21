@@ -13,12 +13,13 @@ const runtimeSocket = require('./fleet-runtime-socket');
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 function refusal(code, message) { return Object.assign(new Error(message), { code }); }
 function confinedTreeHost(host, config) {
+  const workspace = config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment' ? workerFolder(config) : config.workspace;
   const exactWorkspace = () => {
     let real;
-    try { real = fs.realpathSync(config.workspace); } catch {
+    try { real = fs.realpathSync(workspace); } catch {
       throw refusal('HOST_WORKSPACE_UNAVAILABLE', 'The sealed host workspace is unavailable; no Standard worker was started.');
     }
-    if (real !== config.workspace) {
+    if (real !== workspace) {
       throw refusal('HOST_WORKSPACE_SYMLINK_REFUSED', 'The sealed host workspace changed to an alias; no Standard worker was started.');
     }
   };
@@ -47,7 +48,7 @@ function confinedTreeHost(host, config) {
     },
     spawnConfined: request => {
       exactWorkspace();
-      if (request?.workspaceRoot !== config.workspace || request.research !== undefined) {
+      if (request?.workspaceRoot !== workspace || request.research !== undefined) {
         throw refusal('TREE_DELEGATION_REFUSED', 'A Standard host worker must stay in its sealed workspace.');
       }
       return host.spawn(request);
@@ -65,6 +66,7 @@ function confinedTreeHost(host, config) {
 // in the folder the lead works in (this server's working folder) when that is
 // inside the home and outside its hidden entries; otherwise in the workspace.
 function workerFolder(config, cwd = process.cwd()) {
+  if (config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment') return fs.realpathSync(cwd);
   let home, real;
   try { home = fs.realpathSync(require('node:os').userInfo().homedir); real = fs.realpathSync(cwd); }
   catch { return config.workspace; }
@@ -78,7 +80,7 @@ function context({ agentId, sessionId, roleId, surface, config }) {
     agentRole: surface ? require('./role-functions').normalizeFunctionPolicy({ functions: surface.names,
       requiresDirectUserAuthorization: surface.requiresDirectUserAuthorization === true })
       : Object.freeze({ functions: null, requiresDirectUserAuthorization: false }),
-    workspaceRoots: Object.freeze([config.workspace]) });
+    workspaceRoots: Object.freeze([config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment' ? workerFolder(config) : config.workspace]) });
 }
 function workerToken(env, config) {
   const filename = env.TOOLSENABLED_HOST_LINK_TOKEN_FILE;
@@ -128,7 +130,8 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
     throw refusal('HOST_ROLE_CONTROL_ROOT_REQUIRED', 'The explicit role-control option belongs only to the owner root startup, never a worker-linked invocation.');
   }
   if (env.TOOLSENABLED_RUNTIME_MODE !== 'host') throw refusal('HOST_WORKERS_DISABLED', 'Host mode must be selected explicitly.');
-  const clean = Object.fromEntries(Object.entries(env).filter(([name]) => name !== 'OPENSHELL_SANDBOX' && !name.startsWith('TOOLSENABLED_OPENSHELL_')));
+  const inheritedEnvironment = config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment';
+  const clean = inheritedEnvironment ? { ...env } : Object.fromEntries(Object.entries(env).filter(([name]) => name !== 'OPENSHELL_SANDBOX' && !name.startsWith('TOOLSENABLED_OPENSHELL_')));
   clean.TOOLSENABLED_HOST_WORKERS = '1';
   if (clean.TOOLSENABLED_HOST_NODE || clean.TOOLSENABLED_HOST_TREE_SOCKET) {
     const nodeId = clean.TOOLSENABLED_HOST_NODE;
@@ -156,6 +159,11 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
       return permissionProfiles;
     };
     actionPermissions(clean.TOOLSENABLED_FLEET_PROFILE === 'fleetV2' ? { readSaved: () => permissionProfiles } : {});
+    const resolveAmbientAccess = async () => {
+      const result = await host.fileAccess();
+      if (result?.nodeId !== nodeId || result?.sessionId !== sessionId) throw refusal('HOST_WORKER_LINK_INVALID', 'Ambient file authority belongs to another session.');
+      return result.fleetV2Security === 'inherited-environment';
+    };
     const resolveFolderScope = async () => {
       const result = await host.fileAccess();
       if (result?.nodeId !== nodeId || result?.sessionId !== sessionId)
@@ -173,7 +181,7 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
     };
     return Object.freeze({ host: confined, context: Object.freeze({
       ...context({ agentId: nodeId, sessionId, roleId, surface, config }),
-      inheritedFileAccess, ...(clean.TOOLSENABLED_FLEET_PROFILE === 'fleetV2' ? { resolveFolderScope, resolvePermissionProfiles } : {}) }),
+      inheritedFileAccess, ...(clean.TOOLSENABLED_FLEET_PROFILE === 'fleetV2' ? { ...(config.fleetV2Security === 'inherited-environment' ? { resolveAmbientAccess } : { resolveFolderScope }), resolvePermissionProfiles } : {}) }),
       ready: Promise.resolve(), close: async () => {} });
   }
   const agentId = actor && ID.test(actor) ? actor : 'host-owner';
@@ -200,6 +208,7 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
   let resources;
   let currentFolderScope = config.fleetV2Scope;
   const fleetV2 = clean.TOOLSENABLED_FLEET_PROFILE === 'fleetV2' && config.setupKind !== 'plugin';
+  const ambient = fleetV2 && config.fleetV2Security === 'inherited-environment';
   const interactions = require('./host-worker-interactions').createInteractionBroker();
   let interactionTerminal;
   let server;
@@ -238,12 +247,12 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
       document: tree.document, persist: document => store.saveTree(tree.treeFile, document), rootSessionId, resources, observability, onAsk: ask => host.notifyControlAsk(ask), inspect: () => host.list(),
       command: request => host.command(request), settings: (changes, options) => options?.import ? require('./fleet-v2-settings').importSettings(changes) : require('./fleet-v2-settings').set(changes),
     });
-    host = createHost({ fleetV2, ...(fleetV2 ? { folderScope: config.fleetV2Scope } : {}),
+    host = createHost({ fleetV2, ...(ambient ? { fleetV2Security: 'inherited-environment' } : fleetV2 ? { folderScope: config.fleetV2Scope } : {}),
       ...(control ? { getAssignment: control.assignment, recordAssignment: control.ensureTask, controlRequest: control.request, getPermissionProfiles: control.permissionProfiles, statusIntroduction: observability.introduction, recordMetrics: observability.record } : {}), mode: 'host', enableRoleControl, rootSessionId, workspaceRoot: folder, env: clean, launcher, recordedTier: config.tier || 'unrestricted',
       unrestrictedFileRoot: config.setupKind !== 'plugin' && config.tier === 'unrestricted', ...limits,
       root, document: tree.document, persist: document => store.saveTree(tree.treeFile, document), nodeFolder: tree.nodeFolder,
       codexEndpoint: () => null });
-    if (fleetV2) {
+    if (fleetV2 && !ambient) {
       const refresh = require('./fleet-v2-scope-refresh');
       scopeRefresh = refresh.createScopeRefresh({ initialScope: config.fleetV2Scope,
         read: () => refresh.readScope(config.stateRoot), update: async scope => { await host.updateFolderScope(scope); currentFolderScope = scope; },
@@ -294,7 +303,7 @@ function startHostAgentMode({ config, actor, treeKey = null, enableRoleControl =
   return Object.freeze({ host: confined, context: Object.freeze({
     ...context({ agentId, sessionId: rootSessionId,
       roleId: host.root.roleId, surface: host.root.surface, config }),
-    ...(fleetV2 ? { resolveFolderScope: async () => { await ready; await scopeRefresh.refresh(); return require('./fleet-folder-scope').normalize(currentFolderScope); } } : {}),
+    ...(ambient ? { resolveAmbientAccess: async () => { await ready; const live = require('./host-runtime').readHostConfig(config.stateRoot); return live.profile === 'fleetV2' && live.setupKind !== 'plugin' && live.fleetV2Security === 'inherited-environment'; } } : fleetV2 ? { resolveFolderScope: async () => { await ready; await scopeRefresh.refresh(); return require('./fleet-folder-scope').normalize(currentFolderScope); } } : {}),
     permissionSession: require('./permission-tier-policy').effectiveSession(host.root.level, config.tier)
   }), ready, close, treeKey: tree.treeKey, socketPath });
 }

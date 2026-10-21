@@ -10402,8 +10402,12 @@
     "verification": "tests/fleet-v2-control.test.js; tests/fleet-v2-permission-profiles.test.js; tests/fleet-v2-observability.test.js; tests/fleet-v2-message-runtime.test.js; tests/fleet-v2-resources.test.js. Separate ToolsEngine chrome-settings.integration.test.js proves shared-file refusal before source connection.",
     "limitations": [
       "Behavioral assignment policies are instructions, not hard outbound/network guards.",
-      "Parent folder policy is explicit operator configuration; automatic exact observed parent inheritance is not claimed.",
       "Status measurements unavailable to the standalone runtime remain explicitly unknown."
-    ]
+    ],
+    "ambient_mode_update": {
+      "marker": "fleetV2Security: inherited-environment",
+      "behavior": "Owner-selected standalone ambient mode starts in terminal physical cwd and inherits existing OS/external sandbox restrictions. No mandatory declared roots or scope watcher. Byte mediation remains available across OS-accessible paths. Explicit old declared scopes remain scoped without silent widening.",
+      "scope": "This supersedes earlier folder-inheritance requirements for new ambient setups; the immutable audit snapshot remains historical evidence."
+    }
   }
 }

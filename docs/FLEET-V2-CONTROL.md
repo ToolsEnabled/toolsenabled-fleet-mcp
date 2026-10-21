@@ -101,3 +101,19 @@ The full pinned source inspection is
 adds a final integration resolution for fixes made after inspection. It includes
 app settings rows, mounted panels, resource fields, setup controls and quick
 sliders, with explicit standalone exclusions and behavioral-only limitations.
+
+
+New standalone setups may explicitly select
+`fleetV2Security:"inherited-environment"` without a `fleetV2Scope`. In this mode
+Fleet starts in the terminal's physical working directory, inherits its existing
+OS permissions and external sandbox, and adds no filesystem sandbox or scope
+watcher. Relative host paths use that starting directory; byte mediation remains
+available across OS-accessible paths. Fleet never elevates the process or removes
+external restrictions. Existing protected runtime-state and credential-store
+rules on Fleet's host tools remain in effect.
+
+Saved declared-scope setups remain scoped when the ambient marker is absent.
+The configuration rejects combining the ambient marker with declared roots;
+opening an existing scoped setup never silently widens it. The scope-refresh
+behavior described above applies to those declared-scope sessions. Durable
+tasks, rules, Asks, lifecycle and peer messaging work in both modes.

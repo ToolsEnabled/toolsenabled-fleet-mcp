@@ -15,8 +15,8 @@ const SUBAGENT_PROVIDERS = require('./agents/registry').workerAgentIds(require('
 
 function refuse(code, message) { throw Object.assign(new Error(`${code}: ${message}`), { code }); }
 
-function requireHostEnvironment(env = process.env) {
-  if (env.OPENSHELL_SANDBOX === '1' || (env.TOOLSENABLED_RUNTIME_MODE && env.TOOLSENABLED_RUNTIME_MODE !== 'host')) {
+function requireHostEnvironment(env = process.env, { inheritedEnvironment = false } = {}) {
+  if (!inheritedEnvironment && (env.OPENSHELL_SANDBOX === '1' || (env.TOOLSENABLED_RUNTIME_MODE && env.TOOLSENABLED_RUNTIME_MODE !== 'host'))) {
     refuse('HOST_MODE_CONFLICT', 'Use the existing OpenShell entry for an OpenShell installation; host mode must be selected explicitly.');
   }
   if (!['linux', 'win32'].includes(process.platform) || process.arch !== 'x64') {
@@ -98,7 +98,9 @@ function readHostConfig(stateRoot, { allowPluginRebind = false, setupKind = null
   }
   if (config.profile !== undefined && (config.profile !== 'fleetV2' || config.setupKind === 'plugin'))
     refuse('HOST_CONFIG_INVALID', 'FleetV2 is a standalone installation profile.');
-  if (config.profile === 'fleetV2') {
+  if (config.fleetV2Security !== undefined && (config.profile !== 'fleetV2' || config.setupKind === 'plugin' || config.fleetV2Security !== 'inherited-environment' || config.fleetV2Scope !== undefined))
+    refuse('HOST_CONFIG_INVALID', 'The inherited-environment marker belongs only to explicit standalone FleetV2 without a declared scope.');
+  if (config.profile === 'fleetV2' && config.fleetV2Security !== 'inherited-environment') {
     const normalized = require('./fleet-folder-scope').normalize(config.fleetV2Scope);
     if (JSON.stringify(normalized) !== JSON.stringify(config.fleetV2Scope))
       refuse('HOST_CONFIG_INVALID', 'The FleetV2 parent folder policy must be normalized and explicit.');
@@ -162,10 +164,12 @@ function currentPluginLimits() {
 }
 
 function configureHost(config, { env = process.env, actor } = {}) {
-  requireHostEnvironment(env);
+  requireHostEnvironment(env, { inheritedEnvironment: config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment' });
   process.umask(0o077);
   const levelCap = env.TOOLSENABLED_LEVEL_CAP;
   const fleetV2 = config.setupKind !== 'plugin' && config.profile === 'fleetV2';
+  const inheritedOpenShell = fleetV2 && config.fleetV2Security === 'inherited-environment'
+    ? Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith('TOOLSENABLED_OPENSHELL_'))) : {};
   const workerNames = ['TREE_SOCKET', 'NODE', 'SESSION', 'LINK_TOKEN_FILE', 'ROLE', 'DIRECT_ONLY']
     .map(name => `TOOLSENABLED_HOST_${name}`);
   const workerEnvironment = config.workers ? Object.fromEntries(workerNames
@@ -180,7 +184,9 @@ function configureHost(config, { env = process.env, actor } = {}) {
   // A provider can inherit another MCP server's profile. Every runtime state
   // override and identity hint is re-established from this installation.
   for (const name of Object.keys(env)) if (name.startsWith('TOOLSENABLED_')) delete env[name];
+  Object.assign(env, inheritedOpenShell);
   if (fleetV2) env.TOOLSENABLED_FLEET_PROFILE = 'fleetV2';
+  if (fleetV2 && config.fleetV2Security === 'inherited-environment') env.TOOLSENABLED_FLEET_SECURITY = 'inherited-environment';
   if (levelCap !== undefined) env.TOOLSENABLED_LEVEL_CAP = levelCap;
   env.TOOLSENABLED_RUNTIME_MODE = 'host';
   env.TOOLSENABLED_HOST_WORKERS = config.workers ? '1' : '0';
@@ -220,7 +226,8 @@ function configureHost(config, { env = process.env, actor } = {}) {
 }
 
 function setupHost(config, { pluginRebindFrom = null, passEnv } = {}) {
-  requireHostEnvironment();
+  const ambient = config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment';
+  requireHostEnvironment(process.env, { inheritedEnvironment: config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment' });
   const accountHome = fs.realpathSync(os.userInfo().homedir);
   const refuseDotWorkspace = candidate => {
     const relative = path.relative(accountHome, candidate);
@@ -229,7 +236,7 @@ function setupHost(config, { pluginRebindFrom = null, passEnv } = {}) {
       refuse('HOST_WORKSPACE_PROFILE_DOT_REFUSED', 'Choose a project workspace outside the top-level dot folders of your account home.');
     }
   };
-  refuseDotWorkspace(config.workspace);
+  if (!ambient) refuseDotWorkspace(config.workspace);
   if (config.workers) require('./host-worker-prerequisite').requireHostWorkerNative();
   const servicesRoot = configureHost(config);
   const machineRecord = require('./setup/machine-record');
@@ -237,18 +244,18 @@ function setupHost(config, { pluginRebindFrom = null, passEnv } = {}) {
   // Global host mode uses the account home as its workspace; Fleet's file
   // tools then never reach the home's hidden entries.
   const choice = workspace.checkWorkspaceCandidate(config.workspace, { installRoot: INSTALL_ROOT, tier: config.tier, allowHome: true });
-  if (!choice.ok) refuse(choice.code, choice.message);
+  if (!ambient && !choice.ok) refuse(choice.code, choice.message);
   let ancestor = config.workspace;
   while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
   const candidate = path.resolve(fs.realpathSync(ancestor), path.relative(ancestor, config.workspace));
-  refuseDotWorkspace(candidate);
+  if (!ambient) refuseDotWorkspace(candidate);
   if (candidate !== path.resolve(config.workspace)
     || fs.existsSync(config.workspace) && fs.lstatSync(config.workspace).isSymbolicLink()) {
     refuse('HOST_WORKSPACE_SYMLINK_REFUSED', 'Choose a workspace folder that is not a symbolic-link alias.');
   }
   const resolvedChoice = workspace.checkWorkspaceCandidate(candidate,
     { installRoot: fs.realpathSync(INSTALL_ROOT), tier: config.tier, homedir: () => accountHome, allowHome: true });
-  if (!resolvedChoice.ok) refuse(resolvedChoice.code, resolvedChoice.message);
+  if (!ambient && !resolvedChoice.ok) refuse(resolvedChoice.code, resolvedChoice.message);
   const relative = path.relative(accountHome, candidate);
   if (config.setupKind === 'plugin'
       && (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
@@ -380,7 +387,7 @@ function setupPluginHost({ stateRoot, workspace, tier = 'unrestricted', workers 
 }
 
 async function serveHost(config, { actor, treeKey = null, enableRoleControl = false, allowedToolNames } = {}) {
-  requireHostEnvironment();
+  requireHostEnvironment(process.env, { inheritedEnvironment: config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment' });
   const linkedInvocation = Boolean(process.env.TOOLSENABLED_HOST_NODE || process.env.TOOLSENABLED_HOST_TREE_SOCKET || process.env.TOOLSENABLED_HOST_SESSION);
   if (config.profile === 'fleetV2' && !config.workers && linkedInvocation)
     refuse('HOST_WORKER_PROFILE_INVALID', 'A linked worker cannot become a coordination-only root when workers are disabled.');
@@ -406,8 +413,11 @@ async function serveHost(config, { actor, treeKey = null, enableRoleControl = fa
     setupKind: config.setupKind,
     permissionSession: require('./permission-tier-policy').effectiveSessionFromRecord(
       require('./agents/permission-level').leadLevel({ registry: require('./agents/registry').activeRegistry() }).level, record),
-    workspaceRoots: record.workspaceRoots,
-    ...(config.profile === 'fleetV2' && config.setupKind !== 'plugin' ? { resolveFolderScope: async () => {
+    workspaceRoots: config.fleetV2Security === 'inherited-environment' ? [fs.realpathSync(process.cwd())] : record.workspaceRoots,
+    ...(config.profile === 'fleetV2' && config.setupKind !== 'plugin' && config.fleetV2Security === 'inherited-environment' ? { resolveAmbientAccess: async () => {
+      const live = readHostConfig(config.stateRoot);
+      return live.profile === 'fleetV2' && live.setupKind !== 'plugin' && live.fleetV2Security === 'inherited-environment';
+    } } : config.profile === 'fleetV2' && config.setupKind !== 'plugin' ? { resolveFolderScope: async () => {
       const live = readHostConfig(config.stateRoot);
       if (live.profile !== 'fleetV2' || live.setupKind === 'plugin') refuse('HOST_CONFIG_INVALID', 'The standalone parent folder policy is no longer available.');
       return require('./fleet-folder-scope').normalize(live.fleetV2Scope);
