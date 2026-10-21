@@ -27,9 +27,9 @@ function parse(argv) {
 async function main(argv = process.argv.slice(2)) {
   if (!argv.length || ['help', '--help', '-h'].includes(argv[0])) {
     process.stdout.write('fleetV2: setup | serve | status | scope\n'
-      + 'setup [--workspace ABS] [--state-root ABS] [--coordination-only]\n'
+      + 'setup [--workspace ABS] [--state-root ABS] [--coordination-only] [--actor CLIENT]\n'
       + 'serve --state-root ABS --actor PROVIDER [--tree-key KEY]\n'
-      + 'status --state-root ABS\n'
+      + 'status --state-root ABS [--actor CLIENT]\n'
       + 'scope --state-root ABS --revision CURRENT (--read-root ABS ... | --read-all) [--write-root ABS ...]\n'
       + 'New installations inherit the launching environment. Working directory defaults to the terminal starting directory; configure any sandbox outside Fleet. Explicit root flags and scope are retained for legacy scoped installations.\n'); return;
   }
@@ -41,7 +41,7 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (options.revision !== undefined) throw new Error('Revision applies only to a scope update.');
   if (options.command === 'setup') {
-    if (options.actor || options.treeKey) throw new Error('Actor and tree key apply only to serve.');
+    if (options.treeKey) throw new Error('Tree key applies only to serve.');
     process.stdout.write(JSON.stringify(setup.setup(options)) + '\n'); return;
   }
   if (!['serve', 'status'].includes(options.command)) throw new Error('Use fleetV2 setup, serve or status.');
@@ -55,7 +55,7 @@ async function main(argv = process.argv.slice(2)) {
     process.stdout.write(JSON.stringify({ name: 'fleetV2', version: require('../fleetV2.json').version,
       workers: config.workers, workspace: config.workspace, security: config.fleetV2Security || 'configured-folder-scope', ...(config.fleetV2Scope ? { folderScope: config.fleetV2Scope } : {}),
       coordination: 'tasks-rules-asks', entry: path.join(runtime.INSTALL_ROOT, 'bin', 'fleetV2.js'),
-      server: { command: process.execPath, args: [path.join(runtime.INSTALL_ROOT, 'bin', 'fleetV2.js'), 'serve', '--state-root', config.stateRoot, '--actor', 'codex'] },
+      server: setup.leadServer(config, options.actor),
       toolsEngineEnvironment: require('../src/lib/fleet-v2-browser-settings').toolsEngineMcpEnvironment(config) }) + '\n'); return;
   }
   if (!options.actor) throw new Error('Serve requires an explicit provider actor for task, rule and Ask ownership.');

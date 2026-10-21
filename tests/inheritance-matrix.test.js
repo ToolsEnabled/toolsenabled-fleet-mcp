@@ -14,7 +14,7 @@ const { createWorkerLauncher } = require('../src/lib/openshell-worker-session');
 const { createOpenShellAgentHost } = require('../src/lib/openshell-agent-host');
 
 const registry = agents.loadRegistry();
-const workers = registry.agents.filter(agent => agents.WORKER_DRIVERS.includes(agent.worker.driver));
+const workers = registry.agents.filter(agent => !agent.worker.held && agents.WORKER_DRIVERS.includes(agent.worker.driver));
 const scratch = fs.mkdtempSync(path.join(__dirname, '../.inheritance-'));
 const bin = path.join(scratch, 'bin');
 const chainDir = path.join(scratch, 'chain');

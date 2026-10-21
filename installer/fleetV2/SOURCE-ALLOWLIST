@@ -8,6 +8,7 @@ bin/toolsenabled-host.js
 bin/toolsenabled-openshell-host.js
 bin/toolsenabled-openshell.js
 config/agent-org.json
+config/agents/agy.json
 config/agents/claude.json
 config/agents/codex.json
 config/agents/gemini.json
@@ -18,6 +19,7 @@ config/fleet-v2-settings-import.json
 config/model-endpoints.json
 config/settings-registry.json
 config/toolsenabled.policy.json
+docs/ANTIGRAVITY.md
 docs/FLEET-V2-CONTROL.md
 docs/FLEET-V2-SETTINGS-APP-INVENTORY.json
 docs/FLEET-V2-SETUP.md

@@ -28,9 +28,17 @@ function isWithin(root, candidate) {
   return relative === '' || relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
+function leadServer(config, actor = config.leadActor || 'codex') {
+  const registry = require('./agents/registry');
+  const loaded = registry.activeRegistry({ ...process.env, TOOLSENABLED_STATE_ROOT: path.join(config.stateRoot, 'capability') });
+  if (!registry.actorNames(loaded).includes(actor))
+    refuse('FLEET_V2_ACTOR_INVALID', 'Choose a described MCP client actor or local.');
+  return { command: process.execPath, args: [path.join(require('./host-runtime').INSTALL_ROOT, 'bin', 'fleetV2.js'), 'serve', '--state-root', config.stateRoot, '--actor', actor] };
+}
+
 // This is a local operator entry point, never a model-facing MCP operation.
 // Ask/bypass is deliberately absent: these roots describe filesystem authority.
-function setup({ stateRoot, workspace = fs.realpathSync(process.cwd()), readRoots = [], writeRoots = [], readAll = false, workers = true } = {}, { runtime = require('./host-runtime') } = {}) {
+function setup({ stateRoot, workspace = fs.realpathSync(process.cwd()), readRoots = [], writeRoots = [], readAll = false, workers = true, actor = 'codex' } = {}, { runtime = require('./host-runtime') } = {}) {
   process.umask(0o077);
   const inheritedEnvironment = Array.isArray(readRoots) && Array.isArray(writeRoots) && !readRoots.length && !writeRoots.length && readAll === false;
   runtime.requireHostEnvironment(process.env, { inheritedEnvironment });
@@ -55,7 +63,8 @@ function setup({ stateRoot, workspace = fs.realpathSync(process.cwd()), readRoot
   let ancestor = path.dirname(stateRoot);
   while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
   if (fs.realpathSync(ancestor) !== ancestor) refuse('FLEET_V2_PATH_INVALID', 'State ancestors must not cross a directory alias.');
-  const config = Object.freeze({ schemaVersion: 1, mode: 'host', profile: 'fleetV2',
+  leadServer({ stateRoot }, actor); // Validate before any state mutation.
+  const config = Object.freeze({ schemaVersion: 1, mode: 'host', profile: 'fleetV2', leadActor: actor,
     workers, tier: 'unrestricted', workspace, stateRoot, installRoot: runtime.INSTALL_ROOT,
     nodePath: process.execPath, ...(inheritedEnvironment ? { fleetV2Security: 'inherited-environment' } : { fleetV2Scope: scope }) });
   if (process.platform === 'win32') require('./windows-state-security').check('create', stateRoot);
@@ -71,7 +80,7 @@ function setup({ stateRoot, workspace = fs.realpathSync(process.cwd()), readRoot
   else { fs.renameSync(temp, file); const dir = fs.openSync(stateRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); } }
   runtime.readHostConfig(stateRoot);
   return { name: 'fleetV2', setup: 'ready', stateRoot, workspace, workers, security: inheritedEnvironment ? 'inherited-environment' : 'configured-folder-scope', ...(scope ? { folderScope: scope } : {}),
-    server: { command: process.execPath, args: [path.join(runtime.INSTALL_ROOT, 'bin', 'fleetV2.js'), 'serve', '--state-root', stateRoot, '--actor', 'codex'] },
+    server: leadServer(config, actor),
     toolsEngineEnvironment: require('./fleet-v2-browser-settings').toolsEngineMcpEnvironment(config),
     note: inheritedEnvironment ? 'Fleet inherits the launching environment. The terminal starting directory is the working directory, not a filesystem boundary. Configure any sandbox outside Fleet.' : 'This legacy installation retains its explicitly configured folder policy.' };
 }
@@ -115,4 +124,4 @@ function updateScope({ stateRoot, readRoots, writeRoots, readAll = false, revisi
       note: 'The running host must observe this revision and quiesce existing descendants before their next operation. Inspect fleet.control status for live adoption.' };
   } finally { lock.release(); }
 }
-module.exports = { setup, updateScope, defaultStateRoot, physicalDirectory, isWithin };
+module.exports = { setup, updateScope, defaultStateRoot, physicalDirectory, isWithin, leadServer };

@@ -351,11 +351,16 @@ test('the tree relaunches the same ACP conversation when its model choice change
     ['--fixture-level', '2', '--fixture-model', 'fixture/exact']);
 });
 
-test('worker choices include every registered ACP descriptor and the driver has no named-agent paths', () => {
+test('worker choices include every available ACP descriptor and exclude held leads and the driver has no named-agent paths', () => {
   const registry = agents.activeRegistry();
   const acp = registry.agents.filter(agent => agent.worker.driver === 'acp');
   assert.ok(acp.length >= 3);
   for (const agent of acp) {
+    if (agent.worker.held) {
+      assert.equal(agents.workerAgentIds(registry).includes(agent.id), false);
+      for (const choice of Object.keys(agent.models.choices)) assert.equal(tiers[choice], undefined);
+      continue;
+    }
     assert.ok(agents.workerAgentIds(registry).includes(agent.id));
     for (const choice of Object.keys(agent.models.choices)) assert.equal(tiers[choice].provider, agent.id);
   }

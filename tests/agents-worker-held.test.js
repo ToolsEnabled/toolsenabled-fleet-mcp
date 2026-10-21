@@ -8,7 +8,7 @@ const path = require('node:path');
 const agents = require('../src/lib/agents/registry');
 const discovery = require('../src/lib/agents/discovery');
 const source = JSON.parse(fs.readFileSync(path.join(agents.BUNDLED_DIR, 'claude.json'), 'utf8'));
-// No bundled agent is held. The hold stays a descriptor feature, so a person's
+// AGY is a bundled lead with its worker held. A person's
 // own stream-json descriptor carries one here, written before the registry loads.
 function installHeld() {
   const descriptor = structuredClone(source);
@@ -28,8 +28,9 @@ const held = registry.get('held-stream');
 const heldTier = 'held-sonnet';
 const refusal = { code: 'AGENT_WORKER_HELD', message: held.worker.held };
 
-test('no bundled agent is held, and worker.held is optional, immutable, bounded plain text', () => {
-  assert.ok(agents.bundledRegistry().agents.every(agent => !agent.worker.held));
+test('AGY is a held bundled lead, and worker.held is optional, immutable, bounded plain text', () => {
+  assert.deepEqual(agents.bundledRegistry().agents.filter(agent => agent.worker.held).map(agent => agent.id), ['agy']);
+  assert.throws(() => agents.assertWorkerAvailable(registry, 'agy'), { code: 'AGENT_WORKER_HELD' });
   assert.ok(agents.workerAgentIds(registry).includes('claude'));
   const value = structuredClone(source);
   delete value.worker.held;
