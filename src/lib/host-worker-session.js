@@ -111,9 +111,16 @@ const HOST_SESSION_ENV = Object.freeze(new Set([
   'CLAUDE_EFFORT', 'CLAUDE_PID', 'CLAUDE_JOB_DIR', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH',
   'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_REMOTE',
 ]));
-function cliEnvironment(env) {
-  return Object.fromEntries(Object.entries(env).filter(([name]) => name !== 'OPENSHELL_SANDBOX'
-    && !name.startsWith('TOOLSENABLED_OPENSHELL_') && !name.startsWith('TOOLSENABLED_HOST_')
+const FLEET_OPENSHELL_BINDINGS = new Set([
+  'TOOLSENABLED_OPENSHELL_AGENT_ID', 'TOOLSENABLED_OPENSHELL_AGENT_RESUME', 'TOOLSENABLED_OPENSHELL_HOST',
+  'TOOLSENABLED_OPENSHELL_LINK_TOKEN_FILE', 'TOOLSENABLED_OPENSHELL_NODE', 'TOOLSENABLED_OPENSHELL_SESSION',
+  'TOOLSENABLED_OPENSHELL_TREE_SOCKET', 'TOOLSENABLED_OPENSHELL_ROLE', 'TOOLSENABLED_OPENSHELL_LEAD_ROLE',
+  'TOOLSENABLED_OPENSHELL_DIRECT_ONLY', 'TOOLSENABLED_OPENSHELL_AGENTS',
+]);
+function cliEnvironment(env, inheritedEnvironment = false) {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => (inheritedEnvironment || name !== 'OPENSHELL_SANDBOX')
+    && (inheritedEnvironment ? !FLEET_OPENSHELL_BINDINGS.has(name) : !name.startsWith('TOOLSENABLED_OPENSHELL_'))
+    && !name.startsWith('TOOLSENABLED_HOST_')
     && !['TOOLSENABLED_AGENT_ID', 'TOOLSENABLED_AGENT_ACTOR'].includes(name)
     && !HOST_SESSION_ENV.has(name.toUpperCase())));
 }
@@ -248,7 +255,7 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
     throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'A private launch observer factory is required.');
   async function startNative(spec, { launchObservation = null } = {}) {
     requireEnabled(config, env);
-    if (spec.fleetV2 && process.platform === 'win32')
+    if (spec.fleetV2 && spec.fleetV2Security !== 'inherited-environment' && process.platform === 'win32')
       throw refusal('FLEET_WINDOWS_PROVIDER_IPC_UNQUALIFIED', 'The native folder boundary is implemented, but provider IPC under it has not passed qualification; no bypass worker was started.');
     if (launchObservation !== null && typeof launchObservation !== 'function')
       throw refusal('HOST_WORKER_POLICY_OBSERVER_INVALID', 'A private launch observation function is required.');
@@ -273,7 +280,7 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
     // Every worker keeps the person's environment, sign-in variables included;
     // only Fleet's own identity and the launching session's private bindings
     // (HOST_SESSION_ENV, which belong to that one session) are removed.
-    const common = { cwd: workspaceRoot, env: cliEnvironment(env), onEvent: spec.onEvent, containProcessTree: true };
+    const common = { cwd: workspaceRoot, env: cliEnvironment(env, spec.fleetV2 && spec.fleetV2Security === 'inherited-environment'), onEvent: spec.onEvent, containProcessTree: true };
     // The worker starts at the level it inherited (the lead's, or lower), in
     // this agent's own terms. Fleet never asks for more.
     const level = levels.isLevel(spec.level) ? spec.level : levels.DEFAULT_LEVEL;
@@ -344,6 +351,14 @@ function createHostWorkerLauncher({ env = process.env, config, workspaceRoot, so
   async function start(spec, options) {
     if (spec.fleetV2 && env.TOOLSENABLED_HOST_SETUP_KIND === 'plugin')
       throw refusal('FLEET_PROFILE_REFUSED', 'Provider bypass workers require standalone fleetV2.');
+    if (spec.fleetV2Security != null && (!spec.fleetV2 || spec.fleetV2Security !== 'inherited-environment'))
+      throw refusal('FLEET_SECURITY_MODE_INVALID', 'Inherited launch security is available only in explicit standalone fleetV2.');
+    if (spec.fleetV2 && spec.fleetV2Security === 'inherited-environment') {
+      if (spec.folderScope != null) throw refusal('FLEET_SECURITY_MODE_INVALID', 'Inherited launch security cannot add a Fleet folder boundary.');
+      // Native processes inherit the caller's token/kernel policy unchanged.
+      // Retained process groups/Jobs remain enabled; provider approval is separate.
+      return startNative(spec, options);
+    }
     if (spec.fleetV2) return require('./fleet-folder-scope').run(spec.folderScope, () => startNative(spec, options));
     return startNative(spec, options);
   }

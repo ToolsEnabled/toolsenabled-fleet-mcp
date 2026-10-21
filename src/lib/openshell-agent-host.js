@@ -413,6 +413,7 @@ function createOpenShellAgentHost({
   leadLevel = () => require('./agents/permission-level').leadPermissionContext({ registry: KNOWN_AGENTS, env }),
   unrestrictedFileRoot = false,
   fleetV2 = env.TOOLSENABLED_FLEET_PROFILE === 'fleetV2',
+  fleetV2Security = null,
   getMessagePolicy = () => require('./fleet-v2-message-policy').readPolicy(),
   getAssignment = null,
   recordAssignment = null,
@@ -442,6 +443,11 @@ function createOpenShellAgentHost({
   }
   if (fleetV2 && env.TOOLSENABLED_HOST_SETUP_KIND === 'plugin')
     throw refusal('FLEET_PROFILE_REFUSED', 'fleetV2 is available only in standalone host mode.');
+  if (fleetV2Security !== null && (!fleetV2 || fleetV2Security !== 'inherited-environment'))
+    throw refusal('FLEET_SECURITY_MODE_INVALID', 'Inherited launch security requires explicit standalone fleetV2.');
+  const inheritedEnvironment = fleetV2 && fleetV2Security === 'inherited-environment';
+  if (inheritedEnvironment && folderScope !== null)
+    throw refusal('FLEET_SECURITY_MODE_INVALID', 'Inherited launch security cannot add a Fleet folder boundary.');
   let folderTransition = false;
   if (fleetV2 && folderScope) folderScope = require('./fleet-folder-scope').normalize(folderScope);
   const document = storedDocument || { v: 1, treeKey: TREE_ID, root: {}, counter: 0, nodes: [], inbox: [] };
@@ -1304,7 +1310,9 @@ function createOpenShellAgentHost({
       ...(node.role === 'worker' ? ['Do this task yourself. Start agents below you only when it has separate parts that should run in parallel.'] : []),
       // Saves each subagent searching its tools for a way to reach the files.
       ...(mode === 'host' && (node.surface?.names || []).includes('host.read_file')
-        ? [`Your project folder is ${workspaceRoot}. Fleet's host.read_file, host.list_dir, host.patch_file and host.write_file use this folder for relative paths. Standalone unrestricted sessions can mediate permitted files across local folders and drives; confined and plugin sessions retain their workspace limits.`]
+        ? [inheritedEnvironment
+          ? `Your starting working directory is ${workspaceRoot}. Relative Fleet file paths use this directory. File access follows the inherited launch environment; Fleet adds no folder sandbox and external restrictions remain in effect.`
+          : `Your project folder is ${workspaceRoot}. Fleet's host.read_file, host.list_dir, host.patch_file and host.write_file use this folder for relative paths. Standalone unrestricted sessions can mediate permitted files across local folders and drives; confined and plugin sessions retain their workspace limits.`]
         : []),
       `When a turn ends, your last message is delivered to ${managerNameOf(node)} as your report, so end each turn with what it needs to know.`,
       'Reports and messages from agents below you arrive as new turns. To write to your manager or to an agent below you during a turn, use agent_comms.send_local'
@@ -1387,7 +1395,7 @@ function createOpenShellAgentHost({
       }
       session = await launcher.start({
         provider: node.provider,
-        fleetV2, folderScope: node.folderScope || folderScope,
+        fleetV2, ...(inheritedEnvironment ? { fleetV2Security } : { folderScope: node.folderScope || folderScope }),
         level: node.level,
         parentSessionId: state.launchParentSessionId,
         permissionContext: node.permissionContext,
@@ -2258,7 +2266,7 @@ function createOpenShellAgentHost({
             || state.session.resolvedSandbox?.type === 'dangerFullAccess');
       });
       return Object.freeze({ nodeId: node.nodeId, sessionId: node.sessionId,
-        ...(fleetV2 ? { folderScope: node.folderScope || folderScope, permissionProfiles: getPermissionProfiles() } : {}),
+        ...(fleetV2 ? { ...(inheritedEnvironment ? { fleetV2Security } : { folderScope: node.folderScope || folderScope }), permissionProfiles: getPermissionProfiles() } : {}),
         unrestricted: mode === 'host' && unrestrictedFileRoot === true && !closing
           && permissionContext.verifiedParent === true && permissionContext.source === 'ancestor-cli'
           && rootLevel === 4 && recordedTier === 'unrestricted'
@@ -2327,6 +2335,7 @@ function createOpenShellAgentHost({
   // parent policy retires every old process before the new scope is published.
   async function updateFolderScope(next) {
     if (!fleetV2) throw refusal('FLEET_PROFILE_REQUIRED', 'Folder transitions require fleetV2.');
+    if (inheritedEnvironment) throw refusal('FLEET_FOLDER_SCOPE_NOT_MANAGED', 'Folder boundaries belong to the inherited launch environment.');
     const checked = require('./fleet-folder-scope').normalize(next);
     if (folderTransition || folderScope && checked.revision <= folderScope.revision)
       throw refusal('FLEET_FOLDER_REVISION_STALE', 'A newer parent folder revision is required.');

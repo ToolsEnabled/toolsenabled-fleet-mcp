@@ -3,7 +3,7 @@ require('./lib/isolated-environment').activate('fleet-v2-runtime');
 const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {createOpenShellAgentHost}=require('../src/lib/openshell-agent-host');
-function fixture(t,{recordAssignment=()=>{}}={}){
+function fixture(t,{recordAssignment=()=>{},ambient=false}={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'fleet-v2-runtime-'));
  const document={v:1,counter:0,nodes:[],inbox:[]},calls=[],sessions=[];
  let revision=1,assignment='task one',hold=null,idx=0;
@@ -13,7 +13,7 @@ function fixture(t,{recordAssignment=()=>{}}={}){
    async quiesce(){if(hold)await hold;session.closed=true;session.quiescent=true}}; sessions.push(session);return session;}};
  const env={TOOLSENABLED_RUNTIME_MODE:'host',TOOLSENABLED_HOST_WORKERS:'1',TOOLSENABLED_TOOL_ALLOWLIST:'task.list',TOOLSENABLED_LEVEL_CAP:'2',TOOLSENABLED_FLEET_PROFILE:'fleetV2'};
  const roleHooks={lead:()=>({roleId:'manager',role:{maxLevel:2},surface:{names:['task.list']}}),admitChild:()=>({roleId:'worker',surface:{names:['task.list']}}),brief:({task})=>task,maxLevel:()=>2,removeNativeTools:()=>[]};
- const host=createOpenShellAgentHost({mode:'host',rootSessionId:'owner',workspaceRoot:root,env,launcher,document,roleHooks,folderScope:boundary,
+ const host=createOpenShellAgentHost({mode:'host',rootSessionId:'owner',workspaceRoot:root,env,launcher,document,roleHooks,...(ambient?{fleetV2Security:'inherited-environment'}:{folderScope:boundary}),
   getAssignment:()=>({revision,text:assignment}),recordAssignment,
   baseAllowlist:['task.list'],leadLevel:2,tiers:{fixture:{provider:'codex',tier:'premium',model:'fixture-model'}},limits:{maxClass:'premium',providers:['codex']},slotBounds:{maxChildren:10,maxDepth:5},nodeFolder:id=>path.join(root,id),watchIntervalMs:0,codexEndpoint:()=>null,continuationLedger:()=>[],continuationEnabled:()=>false});
  t.after(async()=>{hold=null;await host.closeAll();fs.rmSync(root,{recursive:true,force:true})});
@@ -97,4 +97,31 @@ test('retired peer messages are preserved privately while resume fences old work
  const node=f.document.nodes.find(n=>n.nodeId===a.nodeId);assert.equal(node.queue.length,0);
  assert.equal(node.retiredQueueBatches.flatMap(batch=>batch.items).some(item=>item.text==='preserved accepted peer evidence'),true);
  assert.equal(f.host.list().find(n=>n.nodeId===a.nodeId).retiredQueuedItems,1);
+});
+
+test('explicit ambient host authenticates security mode without creating folder authority',async t=>{
+ const f=fixture(t,{ambient:true}),a=await f.spawn();
+ const spec=f.calls[0];assert.equal(spec.fleetV2Security,'inherited-environment');assert.equal(Object.hasOwn(spec,'folderScope'),false);
+ const receipt=await f.host.handleLink(spec.linkToken,'file.access');
+ assert.equal(receipt.fleetV2Security,'inherited-environment');assert.equal(Object.hasOwn(receipt,'folderScope'),false);
+ await assert.rejects(f.host.updateFolderScope(f.boundary),{code:'FLEET_FOLDER_SCOPE_NOT_MANAGED'});
+ const paused=await f.host.command({parentSessionId:'owner',action:'pause-node',nodeId:a.nodeId});assert.equal(paused.quiescent,true);
+ await f.host.command({parentSessionId:'owner',action:'resume-node',nodeId:a.nodeId});
+ assert.equal(f.calls.at(-1).fleetV2Security,'inherited-environment');assert.equal(Object.hasOwn(f.calls.at(-1),'folderScope'),false);
+});
+test('ambient launcher preserves external flags and cwd while retaining provider bypass and process custody',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'fleet-v2-ambient-launch-'));fs.chmodSync(root,0o700);
+ t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const calls=[],scope=require('../src/lib/fleet-folder-scope');
+ const launcher=require('../src/lib/host-worker-session').createHostWorkerLauncher({
+  env:{TOOLSENABLED_RUNTIME_MODE:'host',TOOLSENABLED_HOST_WORKERS:'1',TOOLSENABLED_LEVEL_CAP:'2',TOOLSENABLED_TOOL_ALLOWLIST:'task.list',OPENSHELL_SANDBOX:'1',TOOLSENABLED_OPENSHELL_EXTERNAL_POLICY:'preserved',TOOLSENABLED_OPENSHELL_SESSION:'retired-owner-binding'},
+  config:{mode:'host',workers:true,stateRoot:root},workspaceRoot:root,socketPath:path.join(root,'socket'),checkNative:()=>{},agentApiMode:()=> 'Disabled',
+  startCodex:async options=>{calls.push(options);assert.equal(scope.current(),null);return{threadId:'ambient-thread',resolvedSandbox:{type:'dangerFullAccess'},close(){}}}
+ });
+ const spec={fleetV2:true,fleetV2Security:'inherited-environment',provider:'codex',level:2,nodeId:'ambient-node',sessionId:'ambient-session',nodeFolder:path.join(root,'node'),linkToken:'synthetic-ambient-token',onEvent:()=>{}};
+ const session=await launcher.start(spec);assert.equal(session.level,2);assert.equal(calls[0].cwd,root);assert.equal(calls[0].containProcessTree,true);
+ assert.equal(calls[0].env.OPENSHELL_SANDBOX,'1');assert.equal(calls[0].env.TOOLSENABLED_OPENSHELL_EXTERNAL_POLICY,'preserved');assert.equal(calls[0].env.TOOLSENABLED_OPENSHELL_SESSION,undefined);
+ assert.deepEqual(calls[0].threadOptions,{sandbox:'danger-full-access',approvalPolicy:'never'});
+ await assert.rejects(launcher.start({...spec,folderScope:{readRoots:['/'],writeRoots:[root],revision:1,source:'contradictory'}}),{code:'FLEET_SECURITY_MODE_INVALID'});
+ await assert.rejects(launcher.start({...spec,fleetV2:false}),{code:'FLEET_SECURITY_MODE_INVALID'});
 });
