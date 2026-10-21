@@ -401,6 +401,8 @@ tests/fleet-text-view.test.js
 tests/fleet-tool-hints.test.js
 tests/fleet-tree-contract.test.js
 tests/fleet-tree-watch.test.js
+tests/fleet-v2-ambient-stdio.test.js
+tests/fleet-v2-ambient.test.js
 tests/fleet-v2-control.test.js
 tests/fleet-v2-file-scope.test.js
 tests/fleet-v2-folder-scope.test.js

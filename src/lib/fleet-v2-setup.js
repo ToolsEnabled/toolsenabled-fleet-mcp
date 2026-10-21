@@ -30,24 +30,25 @@ function isWithin(root, candidate) {
 
 // This is a local operator entry point, never a model-facing MCP operation.
 // Ask/bypass is deliberately absent: these roots describe filesystem authority.
-function setup({ stateRoot, workspace, readRoots, writeRoots, readAll = false, workers = true } = {}, { runtime = require('./host-runtime') } = {}) {
+function setup({ stateRoot, workspace = fs.realpathSync(process.cwd()), readRoots = [], writeRoots = [], readAll = false, workers = true } = {}, { runtime = require('./host-runtime') } = {}) {
   process.umask(0o077);
-  runtime.requireHostEnvironment();
+  const inheritedEnvironment = Array.isArray(readRoots) && Array.isArray(writeRoots) && !readRoots.length && !writeRoots.length && readAll === false;
+  runtime.requireHostEnvironment(process.env, { inheritedEnvironment });
   workspace = physicalDirectory(workspace, 'Workspace');
   if (typeof stateRoot !== 'string' || !path.isAbsolute(stateRoot) || path.resolve(stateRoot) !== stateRoot
       || stateRoot === path.parse(stateRoot).root || stateRoot.includes('\0'))
     refuse('FLEET_V2_PATH_INVALID', 'State root must be an absolute normalized private directory.');
   if (typeof workers !== 'boolean') refuse('FLEET_V2_SETUP_INVALID', 'Workers must be a boolean.');
-  if (overlap(stateRoot, workspace) || overlap(stateRoot, runtime.INSTALL_ROOT) || overlap(workspace, runtime.INSTALL_ROOT))
+  if (overlap(stateRoot, runtime.INSTALL_ROOT) || !inheritedEnvironment && (overlap(stateRoot, workspace) || overlap(workspace, runtime.INSTALL_ROOT)))
     refuse('FLEET_V2_PATH_OVERLAP', 'Workspace, runtime and private state directories must be separate.');
-  if (typeof readAll !== 'boolean' || !Array.isArray(readRoots) || !Array.isArray(writeRoots) || !readAll && readRoots.length === 0)
+  if (typeof readAll !== 'boolean' || !Array.isArray(readRoots) || !Array.isArray(writeRoots) || !inheritedEnvironment && !readAll && readRoots.length === 0)
     refuse('FLEET_V2_SCOPE_REQUIRED', 'Supply the parent folder policy explicitly; permission mode does not establish folder roots.');
-  const scope = require('./fleet-folder-scope').normalize({ readAll, readRoots, writeRoots, revision: 1, source: 'operator-selected-parent-policy' });
-  scope.readRoots.forEach(root => physicalEntry(root, 'Read root'));
-  scope.writeRoots.forEach(root => physicalEntry(root, 'Write root'));
-  if (!scope.readAll && !scope.readRoots.some(root => isWithin(root, workspace)))
+  const scope = inheritedEnvironment ? null : require('./fleet-folder-scope').normalize({ readAll, readRoots, writeRoots, revision: 1, source: 'operator-selected-parent-policy' });
+  scope?.readRoots.forEach(root => physicalEntry(root, 'Read root'));
+  scope?.writeRoots.forEach(root => physicalEntry(root, 'Write root'));
+  if (scope && !scope.readAll && !scope.readRoots.some(root => isWithin(root, workspace)))
     refuse('FLEET_V2_WORKSPACE_OUTSIDE_SCOPE', 'The starting workspace must be readable under the parent folder policy.');
-  for (const root of scope.writeRoots) if (!scope.readAll && !scope.readRoots.some(read => isWithin(read, root)))
+  for (const root of scope?.writeRoots || []) if (!scope.readAll && !scope.readRoots.some(read => isWithin(read, root)))
     refuse('FLEET_V2_SCOPE_INVALID', 'A writable folder must also belong to the parent read scope.');
   // Fresh state only. Never convert an existing plugin/installation in place.
   if (fs.existsSync(stateRoot)) refuse('FLEET_V2_STATE_EXISTS', 'Choose a fresh state directory; existing state is retained unchanged.');
@@ -56,7 +57,7 @@ function setup({ stateRoot, workspace, readRoots, writeRoots, readAll = false, w
   if (fs.realpathSync(ancestor) !== ancestor) refuse('FLEET_V2_PATH_INVALID', 'State ancestors must not cross a directory alias.');
   const config = Object.freeze({ schemaVersion: 1, mode: 'host', profile: 'fleetV2',
     workers, tier: 'unrestricted', workspace, stateRoot, installRoot: runtime.INSTALL_ROOT,
-    nodePath: process.execPath, fleetV2Scope: scope });
+    nodePath: process.execPath, ...(inheritedEnvironment ? { fleetV2Security: 'inherited-environment' } : { fleetV2Scope: scope }) });
   if (process.platform === 'win32') require('./windows-state-security').check('create', stateRoot);
   else fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
   // setupHost checks physical ancestry, private ownership, native worker support
@@ -69,10 +70,10 @@ function setup({ stateRoot, workspace, readRoots, writeRoots, readAll = false, w
   if (process.platform === 'win32') require('./windows-state-security').check('publish', file, temp);
   else { fs.renameSync(temp, file); const dir = fs.openSync(stateRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); } }
   runtime.readHostConfig(stateRoot);
-  return { name: 'fleetV2', setup: 'ready', stateRoot, workspace, workers, folderScope: scope,
+  return { name: 'fleetV2', setup: 'ready', stateRoot, workspace, workers, security: inheritedEnvironment ? 'inherited-environment' : 'configured-folder-scope', ...(scope ? { folderScope: scope } : {}),
     server: { command: process.execPath, args: [path.join(runtime.INSTALL_ROOT, 'bin', 'fleetV2.js'), 'serve', '--state-root', stateRoot, '--actor', 'codex'] },
     toolsEngineEnvironment: require('./fleet-v2-browser-settings').toolsEngineMcpEnvironment(config),
-    note: 'The explicit folder policy must match the lead. Approval mode is separate; no folder policy was inferred from Ask or bypass.' };
+    note: inheritedEnvironment ? 'Fleet inherits the launching environment. The terminal starting directory is the working directory, not a filesystem boundary. Configure any sandbox outside Fleet.' : 'This legacy installation retains its explicitly configured folder policy.' };
 }
 
 function defaultStateRoot() { return path.join(os.homedir(), '.fleetV2'); }
@@ -85,6 +86,8 @@ function updateScope({ stateRoot, readRoots, writeRoots, readAll = false, revisi
   const initial = runtime.readHostConfig(stateRoot);
   if (initial.profile !== 'fleetV2' || initial.setupKind === 'plugin')
     refuse('FLEET_V2_PROFILE_REQUIRED', 'Folder updates belong to a standalone fleetV2 installation.');
+  if (initial.fleetV2Security === 'inherited-environment')
+    refuse('FLEET_V2_EXTERNAL_SANDBOX', 'This installation inherits its launching environment; configure folder restrictions in the external sandbox.');
   if (!Number.isSafeInteger(revision) || revision < 1 || revision >= Number.MAX_SAFE_INTEGER)
     refuse('FLEET_V2_REVISION_REQUIRED', 'Supply the current parent folder revision.');
   if (typeof readAll !== 'boolean' || !Array.isArray(readRoots) || !readAll && !readRoots.length || !Array.isArray(writeRoots))

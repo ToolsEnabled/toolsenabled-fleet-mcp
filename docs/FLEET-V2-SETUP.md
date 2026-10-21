@@ -1,37 +1,33 @@
 # fleetV2 standalone MCP candidate
 
-This is a development candidate, not a qualified public release. It contains the standalone MCP runtime. Provider CLIs, their subscriptions and ToolsEngine are separately installed. It neither installs nor builds vendor plugins.
+Fleet V2 is a standalone MCP runtime. Provider CLIs, their subscriptions and ToolsEngine are separately installed. This package does not install or build vendor plugins.
 
-Requires Node.js 22.19 or newer. Linux workers require the native Python supervisor and supported Landlock kernel. Windows runs natively with Windows PowerShell and NTFS; WSL is not a runtime dependency. Native Windows filesystem restriction fixtures pass, but full restricted provider execution is not yet qualified. Do not treat that fixture result as Windows worker support.
+Requires Node.js 22.19 or newer. Linux uses Python 3 for retained process-tree cleanup. Linux and native Windows x64 are supported targets; Windows uses native PowerShell and NTFS, without WSL. See the retained platform qualification receipts for the exact tested provider paths.
 
-Extract into a new, private folder outside your project and state folders. Authenticate the archive checksum through the channel from which you received it, then run `node verify.cjs` to check the extracted contents. That check detects changed contents; it does not authenticate an untrusted download. Keep the runtime folder stable after setup.
+Fleet inherits the environment from which it is launched. The terminal starting directory becomes the working directory; it is not a filesystem boundary. Fleet does not add a folder sandbox or discover the lead client's folder permissions. Configure any desired filesystem or network restrictions outside Fleet, for example in the sandbox that launches the terminal. Existing operating-system restrictions still apply. Fleet does not elevate privileges or escape an external sandbox.
 
-Run `node runtime/bin/fleetV2.js --help` for the exact CLI. For example, on Linux:
+Extract into a new, private folder outside the state folder. Authenticate the archive checksum through the channel from which you received it, then run `node verify.cjs` to check extracted contents. Keep the runtime folder stable after setup.
+
+From your intended working directory, run:
 
 ```sh
-node runtime/bin/fleetV2.js setup --workspace /absolute/project --state-root /absolute/private-state --read-all --write-root /absolute/project
+node /path/to/runtime/bin/fleetV2.js setup --state-root /absolute/private-state
 ```
 
-Use absolute native paths on Windows, for example `C:\Users\YOU\Projects\project`. The state folder must be new. `--read-all` permits reads already allowed by the operating system; it does not grant writes outside the explicit write roots. Alternatively supply each `--read-root` separately. `--coordination-only` disables worker launching.
+Use absolute native paths on Windows. The state folder must be new. Setup defaults to the current directory; `--workspace` selects a setup directory explicitly. `--coordination-only` disables worker launching. Each new server process and its workers use the server's starting directory, so an MCP client must launch it with the intended working directory.
 
-The folder policy is an explicit operator declaration. Automatic discovery of an arbitrary lead agent's effective folder policy is **not implemented**. Match the policy to the lead's actual authority; neither Ask/bypass mode nor MCP workspace roots proves that authority. Runtime files, provider authentication, provider transcripts and temporary files also require appropriate access. The runtime does not silently grant additional bookkeeping folders.
+Setup prints a `server` command and arguments for the MCP client. Its example actor is `codex`; choose the provider that owns the lead connection. It also prints `toolsEngineEnvironment`, which can be added to a separately configured ToolsEngine MCP. The shared Chrome transfer setting takes effect on the next transfer request and does not replace explicit user authorization.
 
-Setup prints a `server` command and arguments for the MCP client. Its example actor is `codex`; choose the described provider that owns the lead connection. It also prints `toolsEngineEnvironment`, which can be added to the separately configured ToolsEngine MCP environment. The shared Chrome transfer setting then takes effect on the next transfer request. It does not replace explicit user authorization for transferring a signed-in session.
-
-Inspect configuration with:
+Inspect configuration and the supported launch entry with:
 
 ```sh
 node runtime/bin/fleetV2.js status --state-root /absolute/private-state
 ```
 
-Update the complete declared folder policy from the local operator terminal, using its current revision:
+The orchestrator coordinates through task assignments, rules and durable Asks. It retains lifecycle and settings control. Workers use provider bypass and message linked peers. Pausing and editing assignments invalidates stale task authority before resume. Retained process groups and Windows Jobs control lifecycle; they do not grant additional filesystem rights.
 
-```sh
-node runtime/bin/fleetV2.js scope --state-root /absolute/private-state --revision 1 --read-all --write-root /absolute/next-project
-```
+MCP file tools provide byte-coordinated edits across paths accessible to the running process. Private state/credential protections remain. Native and shell edits do not participate in byte mediation. The working directory is only the default for relative paths.
 
-The update records a new revision. The live host observes it and quiesces current workers before their next operation. Inspect the control state before resuming. This command does not change a separately running lead agent's own policy.
+Existing explicitly scoped development installations retain their saved restrictions. The old read/write-root flags and `scope` update command remain available for those installations; an old state is never silently widened. New installations without root flags use `inherited-environment` and do not require folder-policy configuration.
 
-The orchestrator coordinates through task assignments, rules and durable Asks. It retains lifecycle and settings control. Workers use provider bypass, remain subject to their configured native folder boundary, and message linked peers. Native and shell file edits do not participate in MCP byte mediation. No network isolation is provided.
-
-Close the MCP client connection before moving or retiring this extracted runtime. No client registration or live installation is changed automatically. Preserve the separate state directory if you need task history, rules, Asks or audit records.
+Close the MCP client before moving or retiring this extracted runtime. No client registration or live installation is changed automatically. Preserve the separate state directory for task history, rules, Asks and audit records.

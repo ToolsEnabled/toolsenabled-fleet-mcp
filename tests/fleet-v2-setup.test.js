@@ -14,16 +14,24 @@ function fixture(t) {
   t.after(() => fs.rmSync(root, { force: true, recursive: true }));
   return { root, workspace: path.join(root, 'project'), stateRoot: path.join(root, 'state'), other: path.join(root, 'other') };
 }
-function run(args) {
+function run(args, cwd) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('TOOLSENABLED_') && name !== 'OPENSHELL_SANDBOX'));
-  return spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env, timeout: 30_000 });
+  return spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env, cwd, timeout: 120_000 });
 }
 function args(f) { return ['setup', '--workspace', f.workspace, '--state-root', f.stateRoot, '--coordination-only']; }
 
-test('fleetV2 requires explicit folder authority before creating state', t => {
-  const f = fixture(t); const result = run(args(f));
-  assert.equal(result.status, 1, result.stderr); assert.match(result.stderr, /FLEET_V2_SCOPE_REQUIRED/);
-  assert.equal(fs.existsSync(f.stateRoot), false);
+test('fleetV2 defaults to the terminal directory and inherited environment without a folder sandbox', t => {
+  const f = fixture(t);
+  const result = run(['setup', '--state-root', f.stateRoot, '--coordination-only'], f.workspace);
+  assert.equal(result.status, 0, result.stderr);
+  const answer = JSON.parse(result.stdout);
+  const config = JSON.parse(fs.readFileSync(path.join(f.stateRoot, 'host-mode.json')));
+  assert.equal(config.workspace, fs.realpathSync(f.workspace));
+  assert.equal(config.fleetV2Security, 'inherited-environment');
+  assert.equal(config.fleetV2Scope, undefined);
+  assert.equal(answer.security, 'inherited-environment');
+  const update = run(['scope', '--state-root', f.stateRoot, '--revision', '1', '--read-root', f.workspace]);
+  assert.equal(update.status, 1); assert.match(update.stderr, /FLEET_V2_EXTERNAL_SANDBOX/);
 });
 test('fleetV2 setup persists a separate standalone profile and exact multi-folder roots', t => {
   const f = fixture(t);

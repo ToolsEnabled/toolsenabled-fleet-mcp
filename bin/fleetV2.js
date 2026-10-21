@@ -27,11 +27,11 @@ function parse(argv) {
 async function main(argv = process.argv.slice(2)) {
   if (!argv.length || ['help', '--help', '-h'].includes(argv[0])) {
     process.stdout.write('fleetV2: setup | serve | status | scope\n'
-      + 'setup --workspace ABS --state-root ABS (--read-root ABS ... | --read-all) [--write-root ABS ...] [--coordination-only]\n'
+      + 'setup [--workspace ABS] [--state-root ABS] [--coordination-only]\n'
       + 'serve --state-root ABS --actor PROVIDER [--tree-key KEY]\n'
       + 'status --state-root ABS\n'
       + 'scope --state-root ABS --revision CURRENT (--read-root ABS ... | --read-all) [--write-root ABS ...]\n'
-      + 'Supply the lead folder policy explicitly. Workers use bypass within that same policy. A task or Ask answer cannot grant a new folder.\n'); return;
+      + 'New installations inherit the launching environment. Working directory defaults to the terminal starting directory; configure any sandbox outside Fleet. Explicit root flags and scope are retained for legacy scoped installations.\n'); return;
   }
   if (argv.length === 1 && argv[0] === '--version') { process.stdout.write(`fleetV2 ${require('../fleetV2.json').version}\n`); return; }
   const options = parse(argv);
@@ -49,12 +49,14 @@ async function main(argv = process.argv.slice(2)) {
     throw new Error('Folder policy is established by setup, never by a serve invocation.');
   const runtime = require('../src/lib/host-runtime');
   const config = runtime.readHostConfig(options.stateRoot);
-  if (config.profile !== 'fleetV2' || config.setupKind === 'plugin' || !config.fleetV2Scope)
+  if (config.profile !== 'fleetV2' || config.setupKind === 'plugin' || (!config.fleetV2Scope && config.fleetV2Security !== 'inherited-environment'))
     throw new Error('This state is not a standalone fleetV2 installation.');
   if (options.command === 'status') {
     process.stdout.write(JSON.stringify({ name: 'fleetV2', version: require('../fleetV2.json').version,
-      workers: config.workers, workspace: config.workspace, folderScope: config.fleetV2Scope,
-      coordination: 'tasks-rules-asks', entry: path.join(runtime.INSTALL_ROOT, 'bin', 'fleetV2.js') }) + '\n'); return;
+      workers: config.workers, workspace: config.workspace, security: config.fleetV2Security || 'configured-folder-scope', ...(config.fleetV2Scope ? { folderScope: config.fleetV2Scope } : {}),
+      coordination: 'tasks-rules-asks', entry: path.join(runtime.INSTALL_ROOT, 'bin', 'fleetV2.js'),
+      server: { command: process.execPath, args: [path.join(runtime.INSTALL_ROOT, 'bin', 'fleetV2.js'), 'serve', '--state-root', config.stateRoot, '--actor', 'codex'] },
+      toolsEngineEnvironment: require('../src/lib/fleet-v2-browser-settings').toolsEngineMcpEnvironment(config) }) + '\n'); return;
   }
   if (!options.actor) throw new Error('Serve requires an explicit provider actor for task, rule and Ask ownership.');
   const registry = require('../src/lib/agents/registry').activeRegistry({ ...process.env, TOOLSENABLED_STATE_ROOT: path.join(config.stateRoot, 'capability') });
